@@ -1,0 +1,5 @@
+rich>=13.0.0
+textual>=0.60.0
+pydub>=0.25.1
+fastapi>=0.110.0
+uvicorn>=0.29.0
