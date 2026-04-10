@@ -14,10 +14,12 @@ Run:  python server.py [port]   (default 8765)
 """
 
 import asyncio
+import datetime
 import io
 import json
 import os
 import queue
+import subprocess as _subprocess
 import sys
 import threading
 import time
@@ -29,11 +31,24 @@ from typing import AsyncGenerator
 _log_queue: queue.Queue = queue.Queue()
 
 
+_log_file_handle = None  # set during a run to save logs to file
+
+
 class _QueueWriter(io.TextIOBase):
     def write(self, text: str) -> int:
         if text and text.strip():
             _log_queue.put({"type": "log", "text": text.rstrip()})
+            if _log_file_handle:
+                try:
+                    # Strip rich markup for the file
+                    import re as _re
+                    clean = _re.sub(r'\[/?[\w =#\.]+\]', '', text.rstrip())
+                    _log_file_handle.write(clean + "\n")
+                    _log_file_handle.flush()
+                except Exception:
+                    pass
         return len(text)
+
     def flush(self) -> None:
         pass
 
@@ -49,7 +64,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import load_prefs, save_prefs
+from config import load_prefs, save_prefs, load_presets, save_preset, delete_preset
 from utils.ffmpeg_utils import check_ffmpeg, get_audio_info, format_duration
 from utils.file_utils import (
     scan_mp3s, scan_all_media, scan_summary, human_size,
@@ -73,7 +88,7 @@ _run_state = {
 # ── Folder info ────────────────────────────────────────────────────────────────
 
 @app.get("/api/folder/info")
-async def folder_info(path: str = "."):
+async def folder_info(path: str = ".", recursive: bool = False):
     folder = Path(path).expanduser().resolve()
     if not folder.exists():
         return JSONResponse({"error": f"Not found: {folder}"}, status_code=404)
@@ -81,7 +96,7 @@ async def folder_info(path: str = "."):
         return JSONResponse({"error": "Not a directory"}, status_code=400)
 
     try:
-        all_media = scan_all_media(folder)
+        all_media = scan_all_media(folder, recursive=recursive)
         mp3s      = [f for f in all_media if f.suffix.lower() == ".mp3"]
         others    = [f for f in all_media if f.suffix.lower() != ".mp3"]
         sub_dirs  = scan_folders(folder)
@@ -165,6 +180,45 @@ async def run_operation(request: Request):
     _run_state["cancel_flag"].clear()
 
     def _worker():
+        global _log_file_handle
+
+        # ── Cancellable ffmpeg ─────────────────────────────────────────────────
+        import utils.ffmpeg_utils as _fu
+        _orig_run_ffmpeg = _fu.run_ffmpeg
+
+        def _cancellable_run_ffmpeg(args: list[str]) -> tuple[bool, str]:
+            cmd = ["ffmpeg", "-y", "-loglevel", "error"] + args
+            proc = _subprocess.Popen(cmd, stdout=_subprocess.PIPE,
+                                     stderr=_subprocess.PIPE, text=True)
+            cf = _run_state["cancel_flag"]
+            while proc.poll() is None:
+                if cf.is_set():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except _subprocess.TimeoutExpired:
+                        proc.kill()
+                    return False, "Cancelled"
+                time.sleep(0.1)
+            _, stderr = proc.communicate()
+            return proc.returncode == 0, stderr.strip()
+
+        _fu.run_ffmpeg = _cancellable_run_ffmpeg
+
+        # ── Log to file ───────────────────────────────────────────────────────
+        log_dir = folder / ".mp3manager_logs"
+        try:
+            log_dir.mkdir(exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = log_dir / f"{ts}_{op}.txt"
+            _log_file_handle = open(log_path, "w", encoding="utf-8")
+            _log_file_handle.write(
+                f"# MP3 Manager log — {op} — {datetime.datetime.now()}\n"
+                f"# Folder: {folder}\n\n"
+            )
+        except Exception:
+            _log_file_handle = None
+
         try:
             _log_queue.put({"type": "start", "operation": op})
             _dispatch(op, folder, params, prefs, dry_run)
@@ -173,6 +227,13 @@ async def run_operation(request: Request):
             _log_queue.put({"type": "log", "text": f"[red]Error: {e}[/]"})
             _log_queue.put({"type": "log", "text": traceback.format_exc(limit=3)})
         finally:
+            _fu.run_ffmpeg = _orig_run_ffmpeg
+            if _log_file_handle:
+                try:
+                    _log_file_handle.close()
+                except Exception:
+                    pass
+                _log_file_handle = None
             _run_state["running"] = False
             elapsed = round(time.time() - _run_state["started_at"], 1)
             _log_queue.put({"type": "done", "elapsed": elapsed})
@@ -279,6 +340,9 @@ def _dispatch(op: str, folder: Path, params: dict, prefs: dict, dry_run: bool) -
         from operations.export_csv import run_export_csv
         run_export_csv(folder, prefs, dry_run=dry_run)
 
+    elif op == "normalize":
+        _normalize_headless(folder, params.get("preset", "1"), dry_run, recursive=recursive)
+
     elif op == "series":
         from operations.series import run_series
         run_series(folder, prefs, dry_run=dry_run, recursive=recursive)
@@ -289,6 +353,19 @@ def _dispatch(op: str, folder: Path, params: dict, prefs: dict, dry_run: bool) -
     else:
         from ui import error
         error(f"Unknown operation: {op}")
+
+
+# ── Progress helper ────────────────────────────────────────────────────────────
+
+def _emit_progress(current: int, total: int, filename: str, stage: str = "") -> None:
+    """Push a progress event to the SSE stream."""
+    _log_queue.put({
+        "type": "progress",
+        "current": current,
+        "total": total,
+        "filename": filename,
+        "stage": stage,
+    })
 
 
 # ── Headless (non-interactive) operation wrappers ──────────────────────────────
@@ -330,12 +407,16 @@ def _compress_headless(folder: Path, bitrate: int, dry_run: bool, recursive: boo
         return False, f"{f.name}: {err_msg}"
 
     max_w = max(1,(os.cpu_count() or 2)//2)
+    done = 0
+    total = len(to_do)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
         for ok, msg in ex.map(_one, to_do):
-            if ok: success(f"✓ {msg}")
-            else:  error(f"✗ {msg}")
+            done += 1
+            _emit_progress(done, total, msg.split(":")[0] if not ok else msg, "compress")
+            if ok: success(f"✓ [{done}/{total}] {msg}")
+            else:  error(f"✗ [{done}/{total}] {msg}")
 
-    success(f"Compress done: {len(to_do)} files")
+    success(f"Compress done: {total} files")
 
 
 def _speed_headless(folder: Path, speed: float, dry_run: bool, recursive: bool = False) -> None:
@@ -351,16 +432,19 @@ def _speed_headless(folder: Path, speed: float, dry_run: bool, recursive: bool =
     info(f"Speed {speed}× on {len(files)} files  filter={atempo}")
     if dry_run: success("Dry run done."); return
 
-    for f in files:
+    total = len(files)
+    for i, f in enumerate(files, 1):
+        _emit_progress(i, total, f.name, "speed")
+        info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
         tmp = f.with_suffix(".tmp_spd.mp3")
         ok, err_msg = run_ffmpeg(["-i",str(f),"-filter:a",atempo,"-map_metadata","0",str(tmp)])
         if ok and tmp.exists():
             f.unlink(); tmp.rename(f); set_mtime(f, mtime)
-            success(f"✓ {f.name}")
+            success(f"✓ [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
-            error(f"✗ {f.name}: {err_msg}")
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
 
 
 def _split_headless(folder: Path, dur_str: str, after: str, dry_run: bool) -> None:
@@ -383,19 +467,22 @@ def _silence_headless(folder: Path, min_sec: float, db: int, dry_run: bool, recu
             f"areverse,"
             f"silenceremove=start_periods=1:start_threshold={db}dB:start_duration={min_sec},"
             f"areverse")
-    info(f"Remove silence >{min_sec}s/{db}dB from {len(files)} files")
+    total = len(files)
+    info(f"Remove silence >{min_sec}s/{db}dB from {total} files")
     if dry_run: success("Dry run done."); return
 
-    for f in files:
+    for i, f in enumerate(files, 1):
+        _emit_progress(i, total, f.name, "silence")
+        info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
         tmp = f.with_suffix(".tmp_sil.mp3")
         ok, err_msg = run_ffmpeg(["-i",str(f),"-af",filt,"-map_metadata","0",str(tmp)])
         if ok and tmp.exists():
             f.unlink(); tmp.rename(f); set_mtime(f, mtime)
-            success(f"✓ {f.name}")
+            success(f"✓ [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
-            error(f"✗ {f.name}: {err_msg}")
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
 
 
 def _convert_headless(folder: Path, bitrate: int, dry_run: bool, recursive: bool = False) -> None:
@@ -407,10 +494,13 @@ def _convert_headless(folder: Path, bitrate: int, dry_run: bool, recursive: bool
     if not files:
         info(f"No non-MP3 media  |  {scan_summary(folder)}"); return
 
-    info(f"Convert {len(files)} files → {bitrate}kbps MP3")
+    total = len(files)
+    info(f"Convert {total} files → {bitrate}kbps MP3")
     if dry_run: success("Dry run done."); return
 
-    for f in files:
+    for i, f in enumerate(files, 1):
+        _emit_progress(i, total, f.name, "convert")
+        info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
         out = f.with_suffix(".mp3")
         n = 1
@@ -418,10 +508,43 @@ def _convert_headless(folder: Path, bitrate: int, dry_run: bool, recursive: bool
         ok, err_msg = run_ffmpeg(["-i",str(f),"-ab",f"{bitrate}k","-map_metadata","0",str(out)])
         if ok and out.exists():
             set_mtime(out, mtime); f.unlink(missing_ok=True)
-            success(f"✓ {f.name} → {out.name}")
+            success(f"✓ [{i}/{total}] {f.name} → {out.name}")
         else:
             if out.exists(): out.unlink()
-            error(f"✗ {f.name}: {err_msg}")
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
+
+
+def _normalize_headless(folder: Path, preset: str, dry_run: bool, recursive: bool = False) -> None:
+    from ui import info, success, error
+    from utils.ffmpeg_utils import run_ffmpeg
+    from utils.file_utils import set_mtime
+    from operations.normalize import LOUDNORM_PRESETS
+
+    files = scan_mp3s(folder, recursive=recursive)
+    if not files:
+        error(f"No MP3 files  |  {scan_summary(folder)}"); return
+
+    p = LOUDNORM_PRESETS.get(preset, LOUDNORM_PRESETS["1"])
+    filt = f"loudnorm=I={p['I']}:TP={p['TP']}:LRA={p['LRA']}"
+    total = len(files)
+    info(f"Normalize {total} file(s) — {p['name']}  filter={filt}")
+    if dry_run:
+        success("Dry run done."); return
+
+    for i, f in enumerate(files, 1):
+        if not f.exists():
+            error(f"Skipped: {f.name} — not found"); continue
+        _emit_progress(i, total, f.name, "normalize")
+        info(f"[{i}/{total}] {f.name}...")
+        mtime = get_mtime(f)
+        tmp = f.with_suffix(".tmp_norm.mp3")
+        ok, err_msg = run_ffmpeg(["-i", str(f), "-af", filt, "-map_metadata", "0", str(tmp)])
+        if ok and tmp.exists():
+            f.unlink(); tmp.rename(f); set_mtime(f, mtime)
+            success(f"✓ [{i}/{total}] {f.name}")
+        else:
+            if tmp.exists(): tmp.unlink()
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
 
 
 def _pipeline_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, recursive: bool = False) -> None:
@@ -435,15 +558,19 @@ def _pipeline_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, r
 
     params["recursive"] = recursive
     stage_order = ["convert","compress","speed","silence","rename"]
+    enabled_stages = [k for k in stage_order if params.get("stages", {}).get(k, False)]
     reports = []
 
-    for key in stage_order:
+    for idx, key in enumerate(stage_order):
         enabled = params.get("stages", {}).get(key, False)
         sr = StageReport(name=STAGE_LABELS[key], enabled=enabled)
         reports.append(sr)
         if not enabled:
             continue
-        info(f"\n── {STAGE_LABELS[key]} ──")
+        stage_num = enabled_stages.index(key) + 1
+        _log_queue.put({"type": "stage", "name": STAGE_LABELS[key],
+                        "current": stage_num, "total": len(enabled_stages)})
+        info(f"\n── [{stage_num}/{len(enabled_stages)}] {STAGE_LABELS[key]} ──")
         t0 = time.time()
         fns = {
             "convert": _run_convert, "compress": _run_compress,
@@ -481,6 +608,46 @@ async def set_prefs(request: Request):
     prefs.update(data)
     save_prefs(prefs)
     return {"status": "saved"}
+
+
+# ── Presets ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/presets")
+async def api_get_presets():
+    return load_presets()
+
+
+@app.post("/api/presets/{name}")
+async def api_save_preset(name: str, request: Request):
+    data = await request.json()
+    save_preset(name, data)
+    return {"status": "saved", "name": name}
+
+
+@app.delete("/api/presets/{name}")
+async def api_delete_preset(name: str):
+    delete_preset(name)
+    return {"status": "deleted", "name": name}
+
+
+# ── Log download ───────────────────────────────────────────────────────────────
+
+@app.get("/api/logs")
+async def list_logs(folder: str = "."):
+    log_dir = Path(folder).expanduser().resolve() / ".mp3manager_logs"
+    if not log_dir.exists():
+        return {"logs": []}
+    logs = sorted(log_dir.glob("*.txt"), key=lambda f: f.stat().st_mtime, reverse=True)
+    return {"logs": [{"name": f.name, "size": f.stat().st_size} for f in logs[:20]]}
+
+
+@app.get("/api/logs/{folder:path}/{filename}")
+async def download_log(folder: str, filename: str):
+    from fastapi.responses import PlainTextResponse
+    log_path = Path("/" + folder) / ".mp3manager_logs" / filename
+    if not log_path.exists():
+        return JSONResponse({"error": "Log not found"}, status_code=404)
+    return PlainTextResponse(log_path.read_text(encoding="utf-8"))
 
 
 # ── Entry ──────────────────────────────────────────────────────────────────────

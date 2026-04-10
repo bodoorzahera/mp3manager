@@ -25,7 +25,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich import box
 
-from config import save_prefs
+from config import save_prefs, load_presets, save_preset
 from ui import console, header, success, warning, error, info, ask, confirm, choose
 from utils.ffmpeg_utils import (
     get_audio_info, run_ffmpeg, build_atempo_filter,
@@ -74,6 +74,19 @@ def _ask_params(prefs: dict) -> dict | None:
     """
     console.print()
     header("Pipeline Setup — Configure All Stages")
+
+    # ── Load preset ───────────────────────────────────────────────────────────
+    presets = load_presets()
+    if presets:
+        names = list(presets.keys())
+        console.print(f"[bold cyan]Saved presets:[/] {', '.join(names)}")
+        load_name = ask("Load preset (Enter to skip)", default="")
+        if load_name and load_name in presets:
+            loaded = presets[load_name].copy()
+            stages_on = [k for k, v in loaded.get("stages", {}).items() if v]
+            info(f"Loaded [bold]{load_name}[/]  stages: {', '.join(stages_on)}")
+            if confirm("Use this preset?", default=True):
+                return loaded
 
     params: dict = {"stages": {}}
 
@@ -174,6 +187,12 @@ def _ask_params(prefs: dict) -> dict | None:
 
     console.print(t)
 
+    # ── Save preset ───────────────────────────────────────────────────────────
+    preset_name = ask("Save as preset (Enter to skip)", default="")
+    if preset_name:
+        save_preset(preset_name, params)
+        success(f"Preset saved: [bold]{preset_name}[/]")
+
     if not confirm("Start pipeline?", default=True):
         return None
 
@@ -188,10 +207,13 @@ def _run_convert(folder: Path, params: dict, report: StageReport, dry_run: bool)
         report.skipped = True
         return
     bitrate = params.get("convert_bitrate", 128)
+    total = len(files)
+    info(f"  Found [bold]{total}[/] file(s) to convert → {bitrate}kbps")
     import os
-    for f in files:
+    for i, f in enumerate(files, 1):
         if not f.exists():
             report.results.append(FileResult(f.name, False, "file not found (moved/deleted)"))
+            console.print(f"  [red]✗[/] [{i}/{total}] {f.name} — not found")
             continue
         mtime = get_mtime(f)
         out = f.with_suffix(".mp3")
@@ -201,46 +223,59 @@ def _run_convert(folder: Path, params: dict, report: StageReport, dry_run: bool)
             n += 1
         if dry_run:
             report.results.append(FileResult(f.name, True, "dry-run"))
+            console.print(f"  [dim]⊘[/] [{i}/{total}] {f.name} [dim](dry)[/]")
             continue
+        console.print(f"  [cyan]⟳[/] [{i}/{total}] {f.name}...")
         ok, err_msg = run_ffmpeg(["-i", str(f), "-ab", f"{bitrate}k",
                                    "-map_metadata", "0", str(out)])
         if ok and out.exists():
             set_mtime(out, mtime)
             f.unlink(missing_ok=True)
             report.results.append(FileResult(f.name, True))
+            console.print(f"  [green]✓[/] [{i}/{total}] {f.name} → {out.name}")
         else:
             report.results.append(FileResult(f.name, False, err_msg))
+            console.print(f"  [red]✗[/] [{i}/{total}] {f.name} — {err_msg}")
 
 
 def _run_compress(folder: Path, params: dict, report: StageReport, dry_run: bool) -> None:
-    import os, concurrent.futures
     files = scan_mp3s(folder, recursive=params.get("recursive", False))
     if not files:
         report.skipped = True
         return
     bitrate = params.get("compress_bitrate", 64)
+    total = len(files)
+    info(f"  Found [bold]{total}[/] file(s) → target {bitrate}kbps")
 
-    def _one(f: Path) -> FileResult:
+    for i, f in enumerate(files, 1):
         if not f.exists():
-            return FileResult(f.name, False, "file not found (moved/deleted)")
+            report.results.append(FileResult(f.name, False, "file not found (moved/deleted)"))
+            console.print(f"  [red]✗[/] [{i}/{total}] {f.name} — not found")
+            continue
         ai = get_audio_info(f)
         if ai["bitrate_kbps"] and ai["bitrate_kbps"] <= bitrate:
-            return FileResult(f.name, True, f"skipped (already {ai['bitrate_kbps']}kbps)")
+            report.results.append(FileResult(f.name, True, f"skipped (already {ai['bitrate_kbps']}kbps)"))
+            console.print(f"  [dim]⊘[/] [{i}/{total}] {f.name} [dim](already {ai['bitrate_kbps']}kbps)[/]")
+            continue
         if dry_run:
-            return FileResult(f.name, True, "dry-run")
+            report.results.append(FileResult(f.name, True, "dry-run"))
+            console.print(f"  [dim]⊘[/] [{i}/{total}] {f.name} [dim](dry)[/]")
+            continue
+        console.print(f"  [cyan]⟳[/] [{i}/{total}] {f.name} ({ai['bitrate_kbps'] or '?'}→{bitrate}kbps)...")
         mtime = get_mtime(f)
         tmp = f.with_suffix(".tmp_pl_cmp.mp3")
         ok, err = run_ffmpeg(["-i", str(f), "-ab", f"{bitrate}k",
                                "-map_metadata", "0", str(tmp)])
         if ok and tmp.exists():
+            old_size = human_size(f.stat().st_size) if f.exists() else "?"
             f.unlink(); tmp.rename(f); set_mtime(f, mtime)
-            return FileResult(f.name, True)
-        if tmp.exists(): tmp.unlink()
-        return FileResult(f.name, False, err)
-
-    max_w = max(1, (os.cpu_count() or 2) // 2)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
-        report.results = list(ex.map(_one, files))
+            new_size = human_size(f.stat().st_size)
+            report.results.append(FileResult(f.name, True))
+            console.print(f"  [green]✓[/] [{i}/{total}] {f.name} ({old_size}→{new_size})")
+        else:
+            if tmp.exists(): tmp.unlink()
+            report.results.append(FileResult(f.name, False, err))
+            console.print(f"  [red]✗[/] [{i}/{total}] {f.name} — {err}")
 
 
 def _run_speed(folder: Path, params: dict, report: StageReport, dry_run: bool) -> None:
@@ -250,13 +285,18 @@ def _run_speed(folder: Path, params: dict, report: StageReport, dry_run: bool) -
         return
     speed = params.get("speed", 1.25)
     atempo = build_atempo_filter(speed)
-    for f in files:
+    total = len(files)
+    info(f"  Found [bold]{total}[/] file(s) → speed {speed}×")
+    for i, f in enumerate(files, 1):
         if not f.exists():
             report.results.append(FileResult(f.name, False, "file not found (moved/deleted)"))
+            console.print(f"  [red]✗[/] [{i}/{total}] {f.name} — not found")
             continue
         if dry_run:
             report.results.append(FileResult(f.name, True, "dry-run"))
+            console.print(f"  [dim]⊘[/] [{i}/{total}] {f.name} [dim](dry)[/]")
             continue
+        console.print(f"  [cyan]⟳[/] [{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
         tmp = f.with_suffix(".tmp_pl_spd.mp3")
         ok, err = run_ffmpeg(["-i", str(f), "-filter:a", atempo,
@@ -264,9 +304,11 @@ def _run_speed(folder: Path, params: dict, report: StageReport, dry_run: bool) -
         if ok and tmp.exists():
             f.unlink(); tmp.rename(f); set_mtime(f, mtime)
             report.results.append(FileResult(f.name, True))
+            console.print(f"  [green]✓[/] [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
             report.results.append(FileResult(f.name, False, err))
+            console.print(f"  [red]✗[/] [{i}/{total}] {f.name} — {err}")
 
 
 def _run_silence(folder: Path, params: dict, report: StageReport, dry_run: bool) -> None:
@@ -282,13 +324,18 @@ def _run_silence(folder: Path, params: dict, report: StageReport, dry_run: bool)
         f"silenceremove=start_periods=1:start_threshold={db}dB:start_duration={min_sec},"
         f"areverse"
     )
-    for f in files:
+    total = len(files)
+    info(f"  Found [bold]{total}[/] file(s) — silence >{min_sec}s / {db}dB")
+    for i, f in enumerate(files, 1):
         if not f.exists():
             report.results.append(FileResult(f.name, False, "file not found (moved/deleted)"))
+            console.print(f"  [red]✗[/] [{i}/{total}] {f.name} — not found")
             continue
         if dry_run:
             report.results.append(FileResult(f.name, True, "dry-run"))
+            console.print(f"  [dim]⊘[/] [{i}/{total}] {f.name} [dim](dry)[/]")
             continue
+        console.print(f"  [cyan]⟳[/] [{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
         tmp = f.with_suffix(".tmp_pl_sil.mp3")
         ok, err = run_ffmpeg(["-i", str(f), "-af", filt,
@@ -296,6 +343,7 @@ def _run_silence(folder: Path, params: dict, report: StageReport, dry_run: bool)
         if ok and tmp.exists():
             f.unlink(); tmp.rename(f); set_mtime(f, mtime)
             report.results.append(FileResult(f.name, True))
+            console.print(f"  [green]✓[/] [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
             report.results.append(FileResult(f.name, False, err))
@@ -338,12 +386,18 @@ def _run_rename_stage(folder: Path, params: dict, report: StageReport, dry_run: 
     for body, f in no_seq:
         renames.append((f, f"{clean_body(body)}{f.suffix.lower()}", get_mtime(f)))
 
+    total = len(renames)
+    changed = sum(1 for old_f, new_name, _ in renames if old_f.name != new_name)
+    info(f"  Found [bold]{total}[/] file(s) — {changed} to rename")
+
     if not dry_run:
         backup_names(files, folder / ".rename_backup.json")
 
-    for old_f, new_name, mtime in renames:
+    for i, (old_f, new_name, mtime) in enumerate(renames, 1):
         if dry_run:
             report.results.append(FileResult(old_f.name, True, f"→ {new_name} [dry]"))
+            if old_f.name != new_name:
+                console.print(f"  [dim]⊘[/] [{i}/{total}] {old_f.name} → {new_name} [dim](dry)[/]")
             continue
         new_path = old_f.parent / new_name
         try:
@@ -351,10 +405,12 @@ def _run_rename_stage(folder: Path, params: dict, report: StageReport, dry_run: 
                 tmp = old_f.parent / (new_name + ".__tmp__")
                 old_f.rename(tmp)
                 tmp.rename(new_path)
+                console.print(f"  [green]✓[/] [{i}/{total}] {old_f.name} → {new_name}")
             set_mtime(new_path, mtime)
             report.results.append(FileResult(old_f.name, True, f"→ {new_name}"))
         except Exception as exc:
             report.results.append(FileResult(old_f.name, False, str(exc)))
+            console.print(f"  [red]✗[/] [{i}/{total}] {old_f.name} — {exc}")
 
 
 # ── Final report ───────────────────────────────────────────────────────────────
@@ -448,46 +504,40 @@ def run_pipeline(folder: Path, prefs: dict, dry_run: bool = False, recursive: bo
     save_prefs(prefs)
 
     stage_order = ["convert", "compress", "speed", "silence", "rename"]
+    enabled_stages = [k for k in stage_order if params["stages"].get(k, False)]
     stage_reports: list[StageReport] = []
 
     # ── Run each stage ────────────────────────────────────────────────────────
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-        transient=False,
-    ) as progress:
+    for key in stage_order:
+        enabled = params["stages"].get(key, False)
+        sr = StageReport(name=STAGE_LABELS[key], enabled=enabled)
+        stage_reports.append(sr)
 
-        for key in stage_order:
-            enabled = params["stages"].get(key, False)
-            sr = StageReport(name=STAGE_LABELS[key], enabled=enabled)
-            stage_reports.append(sr)
+        if not enabled:
+            continue
 
-            if not enabled:
-                continue
+        stage_num = enabled_stages.index(key) + 1
+        console.rule(
+            f"[bold cyan]  [{stage_num}/{len(enabled_stages)}] {STAGE_LABELS[key]}  [/]"
+        )
+        t0 = time.time()
 
-            task = progress.add_task(f"[cyan]{STAGE_LABELS[key]}...[/]", total=None)
-            t0 = time.time()
+        try:
+            STAGE_FUNCS[key](folder, params, sr, dry_run)
+        except Exception as exc:
+            sr.results.append(FileResult("(stage)", False, traceback.format_exc(limit=3)))
+            error(f"{STAGE_LABELS[key]} crashed: {exc}")
 
-            try:
-                STAGE_FUNCS[key](folder, params, sr, dry_run)
-            except Exception as exc:
-                sr.results.append(FileResult("(stage)", False, traceback.format_exc(limit=3)))
-                error(f"{STAGE_LABELS[key]} crashed: {exc}")
+        sr.elapsed_sec = time.time() - t0
+        ok_n  = sr.succeeded
+        err_n = sr.failed
 
-            sr.elapsed_sec = time.time() - t0
-            ok_n  = sr.succeeded
-            err_n = sr.failed
-            skip  = "(skipped)" if sr.skipped else ""
-
-            label = (
-                f"[green]✓[/] {STAGE_LABELS[key]}  "
-                f"{ok_n} ok  {err_n} err  {skip}  "
-                f"[dim]{sr.elapsed_sec:.1f}s[/]"
-            )
-            progress.update(task, description=label, total=1, completed=1)
+        if sr.skipped:
+            info(f"  [dim]Skipped (nothing to do)[/]")
+        elif err_n == 0:
+            success(f"  {STAGE_LABELS[key]} done — {ok_n} succeeded  ({sr.elapsed_sec:.1f}s)")
+        else:
+            warning(f"  {STAGE_LABELS[key]} done — {ok_n} ok / {err_n} failed  ({sr.elapsed_sec:.1f}s)")
 
     # ── Final report ──────────────────────────────────────────────────────────
     _print_report(stage_reports)

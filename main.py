@@ -52,6 +52,7 @@ MENU = [
     ("7", "Merge                combine files into one"),
     ("8", "Export List (CSV)    file inventory with mtime"),
     ("9", "Series Detection     group files into series subfolders"),
+    ("n", "Normalize Volume     equalize loudness (EBU R128 loudnorm)"),
     ("p", "Pipeline             convert→compress→speed→silence→rename"),
     ("t", "Launch TUI           open Textual graphical interface"),
     ("0", "Exit"),
@@ -70,8 +71,9 @@ def _get_op(key: str):
     if key == "6": from operations.convert    import run_convert;   return run_convert
     if key == "7": from operations.merge      import run_merge;     return run_merge
     if key == "8": from operations.export_csv import run_export_csv;return run_export_csv
-    if key == "9": from operations.series     import run_series;    return run_series
-    if key == "p": from operations.pipeline   import run_pipeline;  return run_pipeline
+    if key == "9": from operations.series     import run_series;      return run_series
+    if key == "n": from operations.normalize  import run_normalize;   return run_normalize
+    if key == "p": from operations.pipeline   import run_pipeline;    return run_pipeline
     return None
 
 

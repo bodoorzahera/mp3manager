@@ -7,7 +7,8 @@ Session: <working_folder>/.mp3manager_session.json
 import json
 from pathlib import Path
 
-PREFS_FILE = Path.home() / ".mp3manager" / "prefs.json"
+PREFS_FILE    = Path.home() / ".mp3manager" / "prefs.json"
+PRESETS_FILE  = Path.home() / ".mp3manager" / "presets.json"
 
 DEFAULT_PREFS: dict = {
     "default_bitrate": 64,
@@ -73,3 +74,33 @@ def clear_session(folder: Path) -> None:
     sf = _session_file(folder)
     if sf.exists():
         sf.unlink()
+
+
+# ── Presets ────────────────────────────────────────────────────────────────────
+
+def load_presets() -> dict:
+    """Return {name: pipeline_params_dict}."""
+    if PRESETS_FILE.exists():
+        try:
+            return json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_preset(name: str, params: dict) -> None:
+    presets = load_presets()
+    presets[name] = params
+    PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PRESETS_FILE.write_text(
+        json.dumps(presets, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def delete_preset(name: str) -> None:
+    presets = load_presets()
+    presets.pop(name, None)
+    PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PRESETS_FILE.write_text(
+        json.dumps(presets, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
