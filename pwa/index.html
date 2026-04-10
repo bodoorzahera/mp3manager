@@ -148,6 +148,14 @@ select.param-input { cursor: pointer; }
 #toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: var(--surface); border: 1px solid var(--border); padding: 10px 20px; border-radius: 20px; font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 100; }
 #toast.show { opacity: 1; }
 
+/* ── Resume banner ── */
+#resume-banner { display: none; background: linear-gradient(90deg,#1c1917,#292524); border-bottom: 2px solid var(--yellow); padding: 8px 14px; align-items: center; gap: 10px; flex-shrink: 0; font-size: 13px; }
+#resume-banner.show { display: flex; }
+#resume-banner .rb-op  { color: var(--yellow); font-weight: 700; }
+#resume-banner .rb-fld { color: var(--muted); font-size: 11px; direction: ltr; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+#resume-btn { background: var(--yellow); color: #1c1917; border: none; border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+#resume-dismiss { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 4px; }
+
 /* ── Browse modal ── */
 #browse-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 300; align-items: center; justify-content: center; }
 #browse-overlay.open { display: flex; }
@@ -179,6 +187,15 @@ select.param-input { cursor: pointer; }
   <div style="margin-right:auto"></div>
   <span style="font-size:11px;color:var(--muted)" id="server-url"></span>
 </header>
+
+<!-- Resume banner -->
+<div id="resume-banner">
+  <span>↩</span>
+  <span class="rb-op" id="rb-op"></span>
+  <span class="rb-fld" id="rb-fld"></span>
+  <button id="resume-btn" onclick="resumeLastOp()">استئناف</button>
+  <button id="resume-dismiss" onclick="dismissResume()" title="إخفاء">✕</button>
+</div>
 
 <!-- Folder bar -->
 <div id="folder-bar">
@@ -367,7 +384,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   selectOp('compress');
   if (currentFolder) loadFolder();
 
-  // Poll status
+  // Check for interrupted operation on first load
+  try {
+    const r = await fetch(`${API}/api/status`);
+    const d = await r.json();
+    if (d.running) { setRunning(true); startSSE(); }
+    else checkResumeBanner(d.last_run);
+  } catch(e) {}
+
+  // Poll status every 3s
   setInterval(pollStatus, 3000);
 });
 
@@ -1032,9 +1057,28 @@ function startSSE() {
     }
   };
   eventSource.onerror = () => {
+    eventSource.close();
+    eventSource = null;
     if (!isRunning) return;
-    appendLog('⚠ انقطع الاتصال بالسيرفر', 'warn');
-    setRunning(false);
+    appendLog('⚠ انقطع الاتصال — إعادة محاولة...', 'warn');
+    // Retry after 3s — pollStatus will reconnect SSE if server is back
+    setTimeout(async () => {
+      try {
+        const r = await fetch(`${API}/api/status`);
+        const d = await r.json();
+        if (d.running) {
+          appendLog('↩ إعادة الاتصال...', 'warn');
+          startSSE();
+        } else {
+          setRunning(false);
+          appendLog('⚠ السيرفر أُعيد تشغيله — العملية انقطعت', 'warn');
+          checkResumeBanner(d.last_run);
+        }
+      } catch(e) {
+        setRunning(false);
+        appendLog('⚠ السيرفر غير متاح', 'warn');
+      }
+    }, 3000);
   };
 }
 
@@ -1116,16 +1160,78 @@ function setRunning(running) {
   }
 }
 
+let _serverWasOffline = false;
+
 async function pollStatus() {
   try {
     const r = await fetch(`${API}/api/status`);
     const d = await r.json();
+
+    // Server came back online after being down
+    if (_serverWasOffline) {
+      _serverWasOffline = false;
+      appendLog('✓ السيرفر عاد للعمل', 'ok');
+    }
+
+    // Server is running but UI thinks it's not → reconnect SSE
     if (d.running && !isRunning) {
-      isRunning = true;
       setRunning(true);
       startSSE();
     }
-  } catch(e) { /* server offline */ }
+
+    // UI thinks it's running but server says no → server restarted mid-op
+    if (!d.running && isRunning) {
+      setRunning(false);
+      appendLog('⚠ السيرفر أُعيد تشغيله — العملية انقطعت', 'warn');
+    }
+
+    // Show resume banner if last operation was interrupted
+    checkResumeBanner(d.last_run);
+
+  } catch(e) {
+    if (isRunning) {
+      setRunning(false);
+      appendLog('⚠ السيرفر غير متاح', 'warn');
+    }
+    _serverWasOffline = true;
+  }
+}
+
+function checkResumeBanner(last) {
+  if (!last || last.status !== 'running') {
+    document.getElementById('resume-banner').classList.remove('show');
+    return;
+  }
+  document.getElementById('rb-op').textContent = last.operation || '';
+  document.getElementById('rb-fld').textContent = last.folder   || '';
+  document.getElementById('resume-banner').classList.add('show');
+}
+
+async function resumeLastOp() {
+  if (isRunning) { toast('العملية شغّالة بالفعل'); return; }
+  document.getElementById('resume-banner').classList.remove('show');
+  clearLog();
+  setRunning(true);
+  try {
+    const r = await fetch(`${API}/api/resume`, { method: 'POST' });
+    const d = await r.json();
+    if (d.error) {
+      appendLog(`✗ ${d.error}`, 'err');
+      setRunning(false);
+      return;
+    }
+    appendLog(`↩ استئناف: ${d.operation}`, 'head');
+    // Update folder input to match
+    if (d.folder) document.getElementById('folder-input').value = d.folder;
+    startSSE();
+  } catch(e) {
+    appendLog(`✗ لا يمكن الاتصال: ${e.message}`, 'err');
+    setRunning(false);
+  }
+}
+
+function dismissResume() {
+  document.getElementById('resume-banner').classList.remove('show');
 }
 
 function toast(msg) {

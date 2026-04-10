@@ -356,7 +356,7 @@ def _run_rename_stage(folder: Path, params: dict, report: StageReport, dry_run: 
     import re, time as _time
     from utils.file_utils import (
         scan_mp3s, extract_sequence_info, body_to_filename,
-        apply_number_action, backup_names,
+        apply_number_action, backup_names, clean_stem,
     )
 
     files = scan_mp3s(folder, recursive=params.get("recursive", False))
@@ -367,7 +367,8 @@ def _run_rename_stage(folder: Path, params: dict, report: StageReport, dry_run: 
     number_action = params.get("number_action", "3")
 
     def clean_body(raw: str) -> str:
-        b = apply_number_action(raw, number_action)
+        b = clean_stem(raw)
+        b = apply_number_action(b, number_action)
         return body_to_filename(b)
 
     with_seq, no_seq = [], []

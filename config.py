@@ -9,6 +9,7 @@ from pathlib import Path
 
 PREFS_FILE    = Path.home() / ".mp3manager" / "prefs.json"
 PRESETS_FILE  = Path.home() / ".mp3manager" / "presets.json"
+LAST_RUN_FILE = Path.home() / ".mp3manager" / "last_run.json"
 
 DEFAULT_PREFS: dict = {
     "default_bitrate": 64,
@@ -104,3 +105,26 @@ def delete_preset(name: str) -> None:
     PRESETS_FILE.write_text(
         json.dumps(presets, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+
+
+# ── Last run (server state persistence) ────────────────────────────────────────
+
+def save_last_run(data: dict) -> None:
+    """Persist current server operation so it survives a restart."""
+    import datetime
+    data.setdefault("saved_at", datetime.datetime.now().isoformat(timespec="seconds"))
+    LAST_RUN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAST_RUN_FILE.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def load_last_run() -> dict | None:
+    if LAST_RUN_FILE.exists():
+        try:
+            return json.loads(LAST_RUN_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return None
+
+

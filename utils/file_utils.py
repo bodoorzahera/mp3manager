@@ -25,22 +25,62 @@ def normalize_digits(s: str) -> str:
     return s.translate(_ARABIC_INDIC)
 
 
+def clean_stem(stem: str) -> str:
+    """Strip download artifacts from filename stem: (MP3_70K), (MP3, .tmp_xxx."""
+    s = stem.strip()
+    # Remove parenthesized/bracketed bitrate indicators: (MP3_70K), [MP3_128K], (MP3)
+    s = re.sub(r'[\(\[]\s*(?:MP3|mp3)\s*[_\s]?\d*\s*K?\s*[\)\]]?', '', s)
+    # Remove truncated variants: "(MP3" at end with no closing paren
+    s = re.sub(r'\(\s*(?:MP3|mp3)\s*$', '', s)
+    # Remove .tmp_xxx suffixes that leaked into stem
+    s = re.sub(r'\.tmp_\w+', '', s)
+    # Clean resulting double separators
+    s = re.sub(r'[_\-]{2,}', '_', s)
+    return s.strip('_- .')
+
+
 def extract_sequence_info(stem: str) -> tuple[int | None, str]:
     """
     Smart extraction: returns (sequence_number_or_None, clean_body).
 
     Priority:
+    0. Arabic episode marker الحلقة_N  → (N, body_without_marker)
     1. Starts with NUMBER_  : '001_lesson'          → (1, 'lesson')
+       1b. If body is long (>20 chars) and has embedded _N_,
+           prefer the embedded number (leading is likely junk)
     2. Ends with NUM_NUM    : 'صحيح البخاري 10_1'   → (1, 'صحيح البخاري')
     3. Ends with _NUM       : 'lesson_3'            → (3, 'lesson')
     4. No number            : 'العقل والنقل ابن...' → (None, original)
     """
-    n = normalize_digits(stem.strip())
+    n = normalize_digits(clean_stem(stem.strip()))
+
+    # 0. Arabic episode marker: الحلقة_N / الحلقه_N (common variant)
+    m = re.search(r'الحلق[ةه]\s*[_\-\s]\s*(\d+)', n)
+    if m:
+        seq = int(m.group(1))
+        body = n[:m.start()] + n[m.end():]
+        # Strip junk leading number prefix (007_, 070_ etc.)
+        body = re.sub(r'^\d+\s*[_\-]\s*', '', body)
+        body = re.sub(r'[_\-]{2,}', '_', body).strip('_- ')
+        return seq, body
 
     # 1. Leading NUMBER[_- ]BODY
     m = re.match(r'^(\d+)\s*[_\-]\s*(.+)$', n)
     if m:
-        return int(m.group(1)), m.group(2).strip()
+        leading = int(m.group(1))
+        rest = m.group(2).strip()
+
+        # 1b. Long Arabic body with embedded episode number:
+        # e.g. 007_long_arabic_title_89_topic → prefer 89 over 007
+        m_tail = re.search(r'^(.+?)[_\-](\d+)(?:[_\-](.+))?$', rest)
+        if m_tail and len(m_tail.group(1)) > 20:
+            tail_seq = int(m_tail.group(2))
+            tail_body = m_tail.group(1).strip('_- ')
+            if m_tail.group(3):
+                tail_body += '_' + m_tail.group(3).strip('_- ')
+            return tail_seq, re.sub(r'[_\-]{2,}', '_', tail_body).strip('_- ')
+
+        return leading, rest
 
     # 2. BODY SPACE VOLUME_PART at end  (e.g. 'name 10_1')
     m = re.search(r'^(.+?)\s+\d+[_\-](\d+)\s*$', n)
@@ -75,7 +115,7 @@ def strip_prefix_number(stem: str) -> str:
 
 
 def apply_number_action(body: str, action: str) -> str:
-    body = normalize_digits(body)
+    body = normalize_digits(clean_stem(body))
     if action == "1":
         cleaned = re.sub(r"\d+", "", body)
         return re.sub(r"[_\-]{2,}", "_", cleaned).strip("_- ")
@@ -157,6 +197,8 @@ def scan_mp3s(folder: Path, recursive: bool = False) -> list[Path]:
         raise PermissionError(f"Cannot read folder: {folder}")
     except FileNotFoundError:
         raise FileNotFoundError(f"Folder not found: {folder}")
+    # Filter out temp file leftovers (.tmp_xxx.mp3)
+    mp3s = [f for f in mp3s if '.tmp_' not in f.name]
     return mp3s
 
 

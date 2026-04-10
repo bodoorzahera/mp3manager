@@ -64,7 +64,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import load_prefs, save_prefs, load_presets, save_preset, delete_preset
+from config import (load_prefs, save_prefs, load_presets, save_preset, delete_preset,
+                    save_last_run, load_last_run)
 from utils.ffmpeg_utils import check_ffmpeg, get_audio_info, format_duration
 from utils.file_utils import (
     scan_mp3s, scan_all_media, scan_summary, human_size,
@@ -176,9 +177,19 @@ async def run_operation(request: Request):
         "running": True,
         "operation": op,
         "folder": str(folder),
+        "copy_path": "",
         "started_at": time.time(),
     })
     _run_state["cancel_flag"].clear()
+
+    # Persist so a server restart can detect the interrupted state
+    save_last_run({
+        "operation": op,
+        "folder": str(folder),
+        "params": params,
+        "dry_run": dry_run,
+        "status": "running",
+    })
 
     def _worker():
         global _log_file_handle
@@ -251,6 +262,14 @@ async def run_operation(request: Request):
                 _log_file_handle = None
             _run_state["running"] = False
             elapsed = round(time.time() - _run_state["started_at"], 1)
+            save_last_run({
+                "operation": op,
+                "folder": str(folder),
+                "params": params,
+                "dry_run": dry_run,
+                "status": "done",
+                "elapsed": elapsed,
+            })
             _log_queue.put({
                 "type": "done",
                 "elapsed": elapsed,
@@ -292,12 +311,111 @@ async def stream_logs():
 async def get_status():
     elapsed = (round(time.time() - _run_state["started_at"], 1)
                if _run_state["running"] and _run_state["started_at"] else 0)
+    last = load_last_run() or {}
     return {
-        "running": _run_state["running"],
+        "running":   _run_state["running"],
         "operation": _run_state["operation"],
-        "folder": _run_state["folder"],
-        "elapsed": elapsed,
+        "folder":    _run_state["folder"],
+        "elapsed":   elapsed,
+        "last_run":  last,          # always present so PWA can show resume
     }
+
+
+@app.post("/api/resume")
+async def resume_last():
+    """Re-run the last interrupted operation (uses existing session files for per-file resume)."""
+    if _run_state["running"]:
+        return JSONResponse({"error": "Already running"}, status_code=409)
+    last = load_last_run()
+    if not last:
+        return JSONResponse({"error": "No previous operation found"}, status_code=404)
+    if last.get("status") == "done":
+        return JSONResponse({"error": "Last operation completed successfully — nothing to resume"}, status_code=400)
+
+    folder  = Path(last["folder"])
+    op      = last["operation"]
+    params  = last.get("params", {})
+    dry_run = last.get("dry_run", False)
+
+    if not folder.is_dir():
+        return JSONResponse({"error": f"Folder no longer exists: {folder}"}, status_code=404)
+
+    # Re-use the normal run endpoint logic
+    while not _log_queue.empty():
+        try: _log_queue.get_nowait()
+        except: pass
+
+    prefs = load_prefs()
+    _apply_params_to_prefs(params, prefs)
+    _run_state.update({
+        "running": True, "operation": op,
+        "folder": str(folder), "copy_path": "",
+        "started_at": time.time(),
+    })
+    _run_state["cancel_flag"].clear()
+    save_last_run({**last, "status": "running"})
+
+    def _resume_worker():
+        global _log_file_handle
+        import utils.ffmpeg_utils as _fu
+        _orig = _fu.run_ffmpeg
+
+        def _cancellable(args):
+            cmd = ["ffmpeg", "-y", "-loglevel", "error"] + args
+            proc = _subprocess.Popen(cmd, stdout=_subprocess.PIPE,
+                                     stderr=_subprocess.PIPE, text=True)
+            cf = _run_state["cancel_flag"]
+            while proc.poll() is None:
+                if cf.is_set():
+                    proc.terminate()
+                    try: proc.wait(timeout=3)
+                    except _subprocess.TimeoutExpired: proc.kill()
+                    return False, "Cancelled"
+                time.sleep(0.1)
+            _, stderr = proc.communicate()
+            return proc.returncode == 0, stderr.strip()
+
+        _fu.run_ffmpeg = _cancellable
+        log_dir = folder / ".mp3manager_logs"
+        try:
+            log_dir.mkdir(exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            _log_file_handle = open(log_dir / f"{ts}_{op}_resume.txt", "w", encoding="utf-8")
+        except Exception:
+            _log_file_handle = None
+
+        try:
+            _log_queue.put({"type": "start", "operation": op})
+            _log_queue.put({"type": "log",   "text": f"↩ Resuming: {op} on {folder}"})
+            work_folder = folder
+            if params.get("make_copy"):
+                from utils.file_utils import make_working_copy
+                try:
+                    work_folder = make_working_copy(folder)
+                    _run_state["copy_path"] = str(work_folder)
+                    _log_queue.put({"type": "log",  "text": f"✓ Copy: {work_folder}"})
+                    _log_queue.put({"type": "copy", "path": str(work_folder)})
+                except Exception as ce:
+                    _log_queue.put({"type": "log", "text": f"[red]Copy failed: {ce}[/]"})
+            _dispatch(op, work_folder, params, prefs, dry_run)
+            save_prefs(prefs)
+        except Exception as e:
+            _log_queue.put({"type": "log", "text": f"[red]Error: {e}[/]"})
+            _log_queue.put({"type": "log", "text": traceback.format_exc(limit=3)})
+        finally:
+            _fu.run_ffmpeg = _orig
+            if _log_file_handle:
+                try: _log_file_handle.close()
+                except: pass
+                _log_file_handle = None
+            _run_state["running"] = False
+            elapsed = round(time.time() - _run_state["started_at"], 1)
+            save_last_run({**last, "status": "done", "elapsed": elapsed})
+            _log_queue.put({"type": "done", "elapsed": elapsed,
+                            "copy_path": _run_state.get("copy_path", "")})
+
+    threading.Thread(target=_resume_worker, daemon=True).start()
+    return {"status": "resuming", "operation": op, "folder": str(folder)}
 
 
 @app.post("/api/cancel")

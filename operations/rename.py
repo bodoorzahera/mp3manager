@@ -24,7 +24,7 @@ from ui import console, header, success, warning, error, info, choose, confirm
 from utils.file_utils import (
     scan_mp3s, extract_sequence_info, body_to_filename,
     apply_number_action, get_mtime, set_mtime,
-    backup_names, restore_names, normalize_digits,
+    backup_names, restore_names, normalize_digits, clean_stem,
 )
 
 
@@ -91,7 +91,8 @@ def run_rename(folder: Path, prefs: dict, dry_run: bool = False, recursive: bool
             save_prefs(prefs)
 
     def clean_body(raw_body: str) -> str:
-        b = apply_number_action(raw_body, number_action)
+        b = clean_stem(raw_body)
+        b = apply_number_action(b, number_action)
         return body_to_filename(b)
 
     # ── Build mtime ladder for sequenced files ────────────────────────────────
