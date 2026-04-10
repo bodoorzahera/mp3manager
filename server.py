@@ -603,10 +603,18 @@ def _speed_headless(folder: Path, speed: float, dry_run: bool, recursive: bool =
         _emit_progress(i, total, f.name, "speed")
         info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
+        from utils.ffmpeg_utils import get_audio_info as _gai3
+        original_br = _gai3(f).get("bitrate_kbps") or 128
+        old_size = f.stat().st_size
         tmp = f.with_suffix(".tmp_spd.mp3")
-        ok, err_msg = run_ffmpeg(["-i",str(f),"-filter:a",atempo,"-map_metadata","0",str(tmp)])
+        ok, err_msg = run_ffmpeg(["-i",str(f),"-filter:a",atempo,
+                                   "-ab",f"{original_br}k","-map_metadata","0",str(tmp)])
         if ok and tmp.exists():
-            f.unlink(); tmp.rename(f); set_mtime(f, mtime)
+            if tmp.stat().st_size > old_size:
+                tmp.unlink()  # keep original
+            else:
+                f.unlink(); tmp.rename(f)
+            set_mtime(f, mtime)
             success(f"✓ [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
@@ -643,11 +651,16 @@ def _silence_headless(folder: Path, min_sec: float, db: int, dry_run: bool, recu
         mtime = get_mtime(f)
         from utils.ffmpeg_utils import get_audio_info as _gai
         original_br = (_gai(f).get("bitrate_kbps") or 128)
+        old_size = f.stat().st_size
         tmp = f.with_suffix(".tmp_sil.mp3")
         ok, err_msg = run_ffmpeg(["-i",str(f),"-af",filt,
                                    "-ab",f"{original_br}k","-map_metadata","0",str(tmp)])
         if ok and tmp.exists():
-            f.unlink(); tmp.rename(f); set_mtime(f, mtime)
+            if tmp.stat().st_size > old_size:
+                tmp.unlink()
+            else:
+                f.unlink(); tmp.rename(f)
+            set_mtime(f, mtime)
             success(f"✓ [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
@@ -790,7 +803,7 @@ def _batch_by_name_headless(
     for d in subdirs:
         s = parse_folder_settings(d.name)
         if s:
-            mp3s = scan_mp3s(d)
+            mp3s = scan_mp3s(d, recursive=True)
             if mp3s:
                 matches.append((d, s[0], s[1], mp3s))
 
@@ -813,7 +826,7 @@ def _batch_by_name_headless(
 
     global_i = 0
     for d, speed, bitrate, _ in matches:
-        files = scan_mp3s(d)
+        files = scan_mp3s(d, recursive=True)
         atempo = build_atempo_filter(speed)
         info(f"\n── {d.name}  ({speed}× / {bitrate}kbps / {len(files)} files) ──")
         for i, f in enumerate(files, 1):
@@ -887,11 +900,16 @@ def _normalize_headless(folder: Path, preset: str, dry_run: bool, recursive: boo
         mtime = get_mtime(f)
         from utils.ffmpeg_utils import get_audio_info as _gai2
         original_br = _gai2(f).get("bitrate_kbps") or 128
+        old_size = f.stat().st_size
         tmp = f.with_suffix(".tmp_norm.mp3")
         ok, err_msg = run_ffmpeg(["-i", str(f), "-af", filt,
                                    "-ab", f"{original_br}k", "-map_metadata", "0", str(tmp)])
         if ok and tmp.exists():
-            f.unlink(); tmp.rename(f); set_mtime(f, mtime)
+            if tmp.stat().st_size > old_size:
+                tmp.unlink()
+            else:
+                f.unlink(); tmp.rename(f)
+            set_mtime(f, mtime)
             success(f"✓ [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()

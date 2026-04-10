@@ -186,8 +186,12 @@ def run_silence(
                 ])
 
                 if ok and tmp.exists():
-                    f.unlink()
-                    tmp.rename(f)
+                    old_size = f.stat().st_size
+                    if tmp.stat().st_size > old_size:
+                        tmp.unlink()  # keep original if output larger
+                    else:
+                        f.unlink()
+                        tmp.rename(f)
                     set_mtime(f, mtime)
                     done_count += 1
                 else:

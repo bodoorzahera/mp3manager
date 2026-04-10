@@ -57,7 +57,7 @@ def run_batch_by_name(
         settings = parse_folder_settings(d.name)
         if settings:
             speed, bitrate = settings
-            mp3s = scan_mp3s(d)
+            mp3s = scan_mp3s(d, recursive=True)
             if mp3s:
                 matches.append((d, speed, bitrate, mp3s))
             else:
@@ -113,7 +113,7 @@ def run_batch_by_name(
 
     for d, speed, bitrate, _ in matches:
         # Re-scan in case files changed
-        files = scan_mp3s(d)
+        files = scan_mp3s(d, recursive=True)
         total = len(files)
         ok_n = err_n = 0
 
@@ -154,7 +154,11 @@ def run_batch_by_name(
                     "-map_metadata", "0", str(tmp),
                 ])
                 if ok and tmp.exists():
-                    f.unlink(); tmp.rename(f)
+                    old_sz = f.stat().st_size
+                    if tmp.stat().st_size > old_sz:
+                        tmp.unlink()
+                    else:
+                        f.unlink(); tmp.rename(f)
                 else:
                     if tmp.exists(): tmp.unlink()
                     error(f"  [red]✗[/] [{i}/{total}] Compress failed: {msg}")
@@ -167,6 +171,7 @@ def run_batch_by_name(
 
             # ── Step 2: Speed ─────────────────────────────────────────────────
             if step_ok:
+                old_sz = f.stat().st_size
                 tmp = f.with_suffix(".tmp_sbn_s.mp3")
                 console.print(
                     f"  [cyan]⟳[/] [{i}/{total}] Speed  {f.name}  ({speed}×)..."
@@ -177,7 +182,10 @@ def run_batch_by_name(
                     "-map_metadata", "0", str(tmp),
                 ])
                 if ok and tmp.exists():
-                    f.unlink(); tmp.rename(f)
+                    if tmp.stat().st_size > old_sz:
+                        tmp.unlink()
+                    else:
+                        f.unlink(); tmp.rename(f)
                 else:
                     if tmp.exists(): tmp.unlink()
                     error(f"  [red]✗[/] [{i}/{total}] Speed failed: {msg}")
@@ -185,6 +193,7 @@ def run_batch_by_name(
 
             # ── Step 3: Silence (optional) ────────────────────────────────────
             if step_ok and silence_filt:
+                old_sz = f.stat().st_size
                 tmp = f.with_suffix(".tmp_sbn_sil.mp3")
                 console.print(
                     f"  [cyan]⟳[/] [{i}/{total}] Silence  {f.name}..."
@@ -195,7 +204,10 @@ def run_batch_by_name(
                     "-map_metadata", "0", str(tmp),
                 ])
                 if ok and tmp.exists():
-                    f.unlink(); tmp.rename(f)
+                    if tmp.stat().st_size > old_sz:
+                        tmp.unlink()
+                    else:
+                        f.unlink(); tmp.rename(f)
                 else:
                     if tmp.exists(): tmp.unlink()
                     warning(

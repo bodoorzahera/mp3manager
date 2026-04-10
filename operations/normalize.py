@@ -90,8 +90,12 @@ def run_normalize(
                     str(tmp),
                 ])
                 if ok and tmp.exists():
-                    f.unlink()
-                    tmp.rename(f)
+                    old_size = f.stat().st_size
+                    if tmp.stat().st_size > old_size:
+                        tmp.unlink()  # keep original if larger
+                    else:
+                        f.unlink()
+                        tmp.rename(f)
                     set_mtime(f, mtime)
                     ok_n += 1
                 else:

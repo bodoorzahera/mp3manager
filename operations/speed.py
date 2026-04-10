@@ -106,6 +106,9 @@ def run_speed(
                     progress.advance(task)
                     continue
                 mtime = get_mtime(f)
+                ai = get_audio_info(f)
+                original_br = ai.get("bitrate_kbps") or 128
+                old_size = f.stat().st_size
                 tmp = f.with_suffix(".tmp_speed.mp3")
 
                 save_session(folder, {
@@ -117,13 +120,17 @@ def run_speed(
                 ok, err_msg = run_ffmpeg([
                     "-i", str(f),
                     "-filter:a", atempo,
+                    "-ab", f"{original_br}k",
                     "-map_metadata", "0",
                     str(tmp),
                 ])
 
                 if ok and tmp.exists():
-                    f.unlink()
-                    tmp.rename(f)
+                    if tmp.stat().st_size > old_size:
+                        tmp.unlink()  # keep original if output is larger
+                    else:
+                        f.unlink()
+                        tmp.rename(f)
                     set_mtime(f, mtime)
                     done_count += 1
                 else:
