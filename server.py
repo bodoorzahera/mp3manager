@@ -442,8 +442,7 @@ def _dispatch(op: str, folder: Path, params: dict, prefs: dict, dry_run: bool) -
     recursive = bool(params.get("recursive", prefs.get("recursive_scan", False)))
 
     if op == "rename":
-        from operations.rename import run_rename
-        run_rename(folder, prefs, dry_run=dry_run, recursive=recursive)
+        _rename_headless(folder, params, prefs, dry_run, recursive=recursive)
 
     elif op == "compress":
         # Non-interactive: inject bitrate directly
@@ -661,6 +660,89 @@ def _convert_headless(folder: Path, bitrate: int, dry_run: bool, recursive: bool
         else:
             if out.exists(): out.unlink()
             error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
+
+
+def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, recursive: bool = False) -> None:
+    """Non-interactive rename — same logic as pipeline's _run_rename_stage."""
+    from ui import info, success, error
+    from utils.file_utils import (
+        scan_mp3s, extract_sequence_info, body_to_filename,
+        apply_number_action, backup_names, clean_stem, set_mtime,
+    )
+    import time as _time
+
+    files = scan_mp3s(folder, recursive=recursive)
+    if not files:
+        error(f"No MP3 files  |  {scan_summary(folder)}"); return
+
+    number_action = params.get("number_action", prefs.get("number_action", "3"))
+
+    def clean_body(raw: str) -> str:
+        b = clean_stem(raw)
+        b = apply_number_action(b, number_action)
+        return body_to_filename(b)
+
+    with_seq, no_seq = [], []
+    for f in files:
+        seq, body = extract_sequence_info(f.stem)
+        if seq is not None:
+            with_seq.append((seq, body, f))
+        else:
+            no_seq.append((body, f))
+
+    with_seq.sort(key=lambda x: x[0])
+    base_time = _time.time()
+    STEP = 60
+
+    renames = []
+    for rank, (seq, body, f) in enumerate(with_seq):
+        renames.append((f, f"{seq:03d}_{clean_body(body)}{f.suffix.lower()}",
+                        base_time - rank * STEP))
+    for body, f in no_seq:
+        renames.append((f, f"{clean_body(body)}{f.suffix.lower()}", get_mtime(f)))
+
+    total = len(renames)
+    changed = sum(1 for old_f, new_name, _ in renames if old_f.name != new_name)
+    info(f"Rename: {total} files, {changed} to rename")
+
+    if dry_run:
+        for i, (old_f, new_name, _) in enumerate(renames, 1):
+            if old_f.name != new_name:
+                info(f"[{i}/{total}] {old_f.name} → {new_name} [dry]")
+        success("Dry run done."); return
+
+    if not dry_run:
+        backup_names(files, folder / ".rename_backup.json")
+
+    # Deduplicate
+    name_counts: dict[str, int] = {}
+    for _, n, _ in renames:
+        name_counts[n.lower()] = name_counts.get(n.lower(), 0) + 1
+    seen: dict[str, int] = {}
+    deduped = []
+    for old_f, new_name, mtime in renames:
+        key = new_name.lower()
+        count = seen.get(key, 0)
+        seen[key] = count + 1
+        if name_counts[key] > 1 and count > 0:
+            stem_p = Path(new_name).stem
+            ext_p  = Path(new_name).suffix
+            new_name = f"{stem_p}_dup{count}{ext_p}"
+        deduped.append((old_f, new_name, mtime))
+    renames = deduped
+
+    for i, (old_f, new_name, mtime) in enumerate(renames, 1):
+        _emit_progress(i, total, old_f.name, "rename")
+        new_path = old_f.parent / new_name
+        try:
+            if old_f.name != new_name:
+                tmp = old_f.parent / (new_name + ".__tmp__")
+                old_f.rename(tmp)
+                tmp.rename(new_path)
+                success(f"✓ [{i}/{total}] {old_f.name} → {new_name}")
+            set_mtime(new_path, mtime)
+        except Exception as exc:
+            error(f"✗ [{i}/{total}] {old_f.name} — {exc}")
 
 
 def _batch_by_name_headless(

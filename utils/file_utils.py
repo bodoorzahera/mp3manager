@@ -87,6 +87,19 @@ def extract_sequence_info(stem: str) -> tuple[int | None, str]:
     if m and m.group(1).strip():
         return int(m.group(2)), m.group(1).strip()
 
+    # 2.5 Long body (no leading number) with embedded _NUMBER_ in middle
+    #     e.g. درس_..._جهله_73_فقه_الصيام_1 → seq=73 (not trailing 1)
+    #     Key: (?=[_\-]\D) ensures the number is followed by _TEXT not _DIGIT
+    if len(n) > 30:
+        embedded = list(re.finditer(r'(?<=[_\-])(\d+)(?=[_\-]\D)', n))
+        for m_emb in embedded:
+            before = n[:m_emb.start() - 1]  # -1 for the separator
+            if len(before) > 20:
+                seq = int(m_emb.group(1))
+                body = n[:m_emb.start() - 1] + n[m_emb.end():]
+                body = re.sub(r'[_\-]{2,}', '_', body).strip('_- ')
+                return seq, body
+
     # 3. BODY[_-]NUM at end  (e.g. 'lesson_3')
     m = re.search(r'^(.+?)\s*[_\-]\s*(\d+)\s*$', n)
     if m and m.group(1).strip('_- '):
