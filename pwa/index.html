@@ -354,6 +354,7 @@ let logLines = 0;
 let prefs = {};
 let _presets = {};
 let _logBuffer = [];
+let _resumeClicked = false;
 let _startTime = 0;
 let _elapsedTimer = null;
 
@@ -1041,14 +1042,31 @@ function startSSE() {
       return;
     }
     if (msg.type === 'done') {
-      appendLog(`✓ اكتمل في ${msg.elapsed}s`, 'ok');
+      // ── Savings report ──
+      let report = `✓ اكتمل في ${msg.elapsed} ثانية`;
+      if (msg.size_before && msg.size_after) {
+        const saved = msg.size_before - msg.size_after;
+        const beforeMB = (msg.size_before / 1048576).toFixed(1);
+        const afterMB  = (msg.size_after  / 1048576).toFixed(1);
+        if (saved > 0) {
+          const pct = Math.round((saved / msg.size_before) * 100);
+          const savedMB = (saved / 1048576).toFixed(1);
+          report += `\n💾 الحجم: ${beforeMB} MB → ${afterMB} MB  (وفّرت ${pct}% — ${savedMB} MB)`;
+        } else if (saved < 0) {
+          report += `\n📦 الحجم: ${beforeMB} MB → ${afterMB} MB`;
+        } else {
+          report += `\n📦 الحجم: ${afterMB} MB (بدون تغيير)`;
+        }
+      }
+      appendLog(report, 'ok');
+
       if (msg.copy_path) {
         const el = document.getElementById('copy-notice');
         document.getElementById('copy-path').textContent = msg.copy_path;
         el.style.display = 'flex';
       }
+      _resumeClicked = false;
       setRunning(false);
-      // Navigate to the copy so user sees results
       if (msg.copy_path) {
         document.getElementById('folder-input').value = msg.copy_path;
       }
@@ -1152,11 +1170,18 @@ function setRunning(running) {
     }, 1000);
   } else {
     if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null; }
-    // Show completion briefly, then hide
-    document.getElementById('live-file').textContent = '✓ اكتمل';
+    // Show green completion banner briefly
+    document.getElementById('live-stage').textContent = '✓ اكتملت العملية';
+    document.getElementById('live-file').textContent = '';
     document.getElementById('live-bar-fill').style.width = '100%';
+    document.getElementById('live-bar-fill').style.background = 'var(--green)';
     document.getElementById('live-pct').textContent = '100%';
-    setTimeout(() => liveEl.classList.remove('active'), 4000);
+    liveEl.style.borderBottomColor = 'var(--green)';
+    setTimeout(() => {
+      liveEl.classList.remove('active');
+      liveEl.style.borderBottomColor = '';
+      document.getElementById('live-bar-fill').style.background = '';
+    }, 5000);
   }
 }
 
@@ -1198,6 +1223,11 @@ async function pollStatus() {
 }
 
 function checkResumeBanner(last) {
+  // Don't show if user already clicked resume or if an operation is running
+  if (_resumeClicked || isRunning) {
+    document.getElementById('resume-banner').classList.remove('show');
+    return;
+  }
   if (!last || last.status !== 'running') {
     document.getElementById('resume-banner').classList.remove('show');
     return;
@@ -1209,6 +1239,7 @@ function checkResumeBanner(last) {
 
 async function resumeLastOp() {
   if (isRunning) { toast('العملية شغّالة بالفعل'); return; }
+  _resumeClicked = true;
   document.getElementById('resume-banner').classList.remove('show');
   clearLog();
   setRunning(true);

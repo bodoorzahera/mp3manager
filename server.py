@@ -191,6 +191,12 @@ async def run_operation(request: Request):
         "status": "running",
     })
 
+    def _folder_size(p):
+        try:
+            return sum(f.stat().st_size for f in Path(p).rglob('*') if f.is_file())
+        except Exception:
+            return 0
+
     def _worker():
         global _log_file_handle
 
@@ -231,11 +237,13 @@ async def run_operation(request: Request):
         except Exception:
             _log_file_handle = None
 
+        size_before = 0
+        work_folder = folder
+
         try:
             _log_queue.put({"type": "start", "operation": op})
 
             # ── Optional working copy ─────────────────────────────────────────
-            work_folder = folder
             if params.get("make_copy"):
                 from utils.file_utils import make_working_copy
                 _log_queue.put({"type": "log", "text": "→ Creating working copy..."})
@@ -247,6 +255,7 @@ async def run_operation(request: Request):
                 except Exception as ce:
                     _log_queue.put({"type": "log", "text": f"[red]✗ Copy failed: {ce} — using original[/]"})
 
+            size_before = _folder_size(work_folder)
             _dispatch(op, work_folder, params, prefs, dry_run)
             save_prefs(prefs)
         except Exception as e:
@@ -262,6 +271,7 @@ async def run_operation(request: Request):
                 _log_file_handle = None
             _run_state["running"] = False
             elapsed = round(time.time() - _run_state["started_at"], 1)
+            size_after = _folder_size(work_folder)
             save_last_run({
                 "operation": op,
                 "folder": str(folder),
@@ -274,6 +284,8 @@ async def run_operation(request: Request):
                 "type": "done",
                 "elapsed": elapsed,
                 "copy_path": _run_state.get("copy_path", ""),
+                "size_before": size_before,
+                "size_after": size_after,
             })
 
     threading.Thread(target=_worker, daemon=True).start()
@@ -384,10 +396,16 @@ async def resume_last():
         except Exception:
             _log_file_handle = None
 
+        size_before = 0
+        work_folder = folder
+
+        def _rfs(p):
+            try: return sum(f.stat().st_size for f in Path(p).rglob('*') if f.is_file())
+            except: return 0
+
         try:
             _log_queue.put({"type": "start", "operation": op})
             _log_queue.put({"type": "log",   "text": f"↩ Resuming: {op} on {folder}"})
-            work_folder = folder
             if params.get("make_copy"):
                 from utils.file_utils import make_working_copy
                 try:
@@ -397,6 +415,7 @@ async def resume_last():
                     _log_queue.put({"type": "copy", "path": str(work_folder)})
                 except Exception as ce:
                     _log_queue.put({"type": "log", "text": f"[red]Copy failed: {ce}[/]"})
+            size_before = _rfs(work_folder)
             _dispatch(op, work_folder, params, prefs, dry_run)
             save_prefs(prefs)
         except Exception as e:
@@ -410,9 +429,11 @@ async def resume_last():
                 _log_file_handle = None
             _run_state["running"] = False
             elapsed = round(time.time() - _run_state["started_at"], 1)
+            size_after = _rfs(work_folder)
             save_last_run({**last, "status": "done", "elapsed": elapsed})
             _log_queue.put({"type": "done", "elapsed": elapsed,
-                            "copy_path": _run_state.get("copy_path", "")})
+                            "copy_path": _run_state.get("copy_path", ""),
+                            "size_before": size_before, "size_after": size_after})
 
     threading.Thread(target=_resume_worker, daemon=True).start()
     return {"status": "resuming", "operation": op, "folder": str(folder)}
