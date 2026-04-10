@@ -167,6 +167,8 @@ def run_silence(
                     progress.advance(task)
                     continue
                 mtime = get_mtime(f)
+                ai = get_audio_info(f)
+                original_br = ai.get("bitrate_kbps") or 128
                 tmp = f.with_suffix(".tmp_silence.mp3")
 
                 save_session(folder, {
@@ -178,6 +180,7 @@ def run_silence(
                 ok, err_msg = run_ffmpeg([
                     "-i", str(f),
                     "-af", silence_filter,
+                    "-ab", f"{original_br}k",
                     "-map_metadata", "0",
                     str(tmp),
                 ])

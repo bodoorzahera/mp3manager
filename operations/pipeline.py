@@ -337,8 +337,11 @@ def _run_silence(folder: Path, params: dict, report: StageReport, dry_run: bool)
             continue
         console.print(f"  [cyan]⟳[/] [{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
+        ai = get_audio_info(f)
+        original_br = ai.get("bitrate_kbps") or 128
         tmp = f.with_suffix(".tmp_pl_sil.mp3")
         ok, err = run_ffmpeg(["-i", str(f), "-af", filt,
+                               "-ab", f"{original_br}k",
                                "-map_metadata", "0", str(tmp)])
         if ok and tmp.exists():
             f.unlink(); tmp.rename(f); set_mtime(f, mtime)

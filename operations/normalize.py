@@ -79,10 +79,13 @@ def run_normalize(
                     progress.advance(task)
                     continue
                 mtime = get_mtime(f)
+                from utils.ffmpeg_utils import get_audio_info
+                original_br = get_audio_info(f).get("bitrate_kbps") or 128
                 tmp = f.with_suffix(".tmp_norm.mp3")
                 ok, err_msg = run_ffmpeg([
                     "-i", str(f),
                     "-af", filt,
+                    "-ab", f"{original_br}k",
                     "-map_metadata", "0",
                     str(tmp),
                 ])

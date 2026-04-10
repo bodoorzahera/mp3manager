@@ -80,6 +80,7 @@ _run_state = {
     "running": False,
     "operation": None,
     "folder": None,
+    "copy_path": "",
     "started_at": None,
     "cancel_flag": threading.Event(),
 }
@@ -221,7 +222,21 @@ async def run_operation(request: Request):
 
         try:
             _log_queue.put({"type": "start", "operation": op})
-            _dispatch(op, folder, params, prefs, dry_run)
+
+            # ── Optional working copy ─────────────────────────────────────────
+            work_folder = folder
+            if params.get("make_copy"):
+                from utils.file_utils import make_working_copy
+                _log_queue.put({"type": "log", "text": "→ Creating working copy..."})
+                try:
+                    work_folder = make_working_copy(folder)
+                    _run_state["copy_path"] = str(work_folder)
+                    _log_queue.put({"type": "log",  "text": f"✓ Copy: {work_folder}"})
+                    _log_queue.put({"type": "copy", "path": str(work_folder)})
+                except Exception as ce:
+                    _log_queue.put({"type": "log", "text": f"[red]✗ Copy failed: {ce} — using original[/]"})
+
+            _dispatch(op, work_folder, params, prefs, dry_run)
             save_prefs(prefs)
         except Exception as e:
             _log_queue.put({"type": "log", "text": f"[red]Error: {e}[/]"})
@@ -236,7 +251,11 @@ async def run_operation(request: Request):
                 _log_file_handle = None
             _run_state["running"] = False
             elapsed = round(time.time() - _run_state["started_at"], 1)
-            _log_queue.put({"type": "done", "elapsed": elapsed})
+            _log_queue.put({
+                "type": "done",
+                "elapsed": elapsed,
+                "copy_path": _run_state.get("copy_path", ""),
+            })
 
     threading.Thread(target=_worker, daemon=True).start()
     return {"status": "started", "operation": op}
@@ -342,6 +361,15 @@ def _dispatch(op: str, folder: Path, params: dict, prefs: dict, dry_run: bool) -
 
     elif op == "normalize":
         _normalize_headless(folder, params.get("preset", "1"), dry_run, recursive=recursive)
+
+    elif op == "batch_folders":
+        _batch_by_name_headless(
+            folder,
+            do_silence=bool(params.get("do_silence", False)),
+            silence_sec=float(params.get("silence_sec", prefs.get("silence_threshold_sec", 0.5))),
+            silence_db=int(params.get("silence_db", prefs.get("silence_db", -40))),
+            dry_run=dry_run,
+        )
 
     elif op == "series":
         from operations.series import run_series
@@ -475,8 +503,11 @@ def _silence_headless(folder: Path, min_sec: float, db: int, dry_run: bool, recu
         _emit_progress(i, total, f.name, "silence")
         info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
+        from utils.ffmpeg_utils import get_audio_info as _gai
+        original_br = (_gai(f).get("bitrate_kbps") or 128)
         tmp = f.with_suffix(".tmp_sil.mp3")
-        ok, err_msg = run_ffmpeg(["-i",str(f),"-af",filt,"-map_metadata","0",str(tmp)])
+        ok, err_msg = run_ffmpeg(["-i",str(f),"-af",filt,
+                                   "-ab",f"{original_br}k","-map_metadata","0",str(tmp)])
         if ok and tmp.exists():
             f.unlink(); tmp.rename(f); set_mtime(f, mtime)
             success(f"✓ [{i}/{total}] {f.name}")
@@ -514,6 +545,102 @@ def _convert_headless(folder: Path, bitrate: int, dry_run: bool, recursive: bool
             error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
 
 
+def _batch_by_name_headless(
+    folder: Path,
+    do_silence: bool,
+    silence_sec: float,
+    silence_db: int,
+    dry_run: bool,
+) -> None:
+    from operations.batch_by_name import parse_folder_settings
+    from ui import info, success, error, warning
+    from utils.ffmpeg_utils import run_ffmpeg, build_atempo_filter, get_audio_info
+    from utils.file_utils import set_mtime
+
+    try:
+        subdirs = sorted(
+            (d for d in folder.iterdir() if d.is_dir() and not d.name.startswith(".")),
+            key=lambda d: d.name.lower(),
+        )
+    except Exception as exc:
+        error(f"Cannot read folder: {exc}"); return
+
+    matches = []
+    for d in subdirs:
+        s = parse_folder_settings(d.name)
+        if s:
+            mp3s = scan_mp3s(d)
+            if mp3s:
+                matches.append((d, s[0], s[1], mp3s))
+
+    if not matches:
+        error("No matching subfolders found (pattern: spX.XXbtYY)"); return
+
+    total_files = sum(len(mp3s) for _, _, _, mp3s in matches)
+    info(f"Batch: {len(matches)} folders · {total_files} files · silence={'yes' if do_silence else 'no'}")
+    if dry_run:
+        success("Dry run done."); return
+
+    silence_filt = (
+        f"silenceremove=start_periods=1:start_threshold={silence_db}dB"
+        f":start_duration={silence_sec},"
+        f"areverse,"
+        f"silenceremove=start_periods=1:start_threshold={silence_db}dB"
+        f":start_duration={silence_sec},"
+        f"areverse"
+    ) if do_silence else None
+
+    global_i = 0
+    for d, speed, bitrate, _ in matches:
+        files = scan_mp3s(d)
+        atempo = build_atempo_filter(speed)
+        info(f"\n── {d.name}  ({speed}× / {bitrate}kbps / {len(files)} files) ──")
+        for i, f in enumerate(files, 1):
+            global_i += 1
+            _emit_progress(global_i, total_files, f.name, "batch")
+            if not f.exists():
+                error(f"✗ {f.name} — not found"); continue
+            mtime = get_mtime(f)
+            orig_br = get_audio_info(f).get("bitrate_kbps") or 999
+            step_ok = True
+
+            if orig_br > bitrate:
+                info(f"[{i}/{len(files)}] Compress {f.name} ({orig_br}→{bitrate}kbps)...")
+                tmp = f.with_suffix(".tmp_sbn_c.mp3")
+                ok, msg = run_ffmpeg(["-i",str(f),"-ab",f"{bitrate}k","-map_metadata","0",str(tmp)])
+                if ok and tmp.exists():
+                    f.unlink(); tmp.rename(f)
+                else:
+                    if tmp.exists(): tmp.unlink()
+                    error(f"✗ Compress failed: {msg}"); step_ok = False
+
+            if step_ok:
+                info(f"[{i}/{len(files)}] Speed {f.name} ({speed}×)...")
+                tmp = f.with_suffix(".tmp_sbn_s.mp3")
+                ok, msg = run_ffmpeg(["-i",str(f),"-filter:a",atempo,"-ab",f"{bitrate}k","-map_metadata","0",str(tmp)])
+                if ok and tmp.exists():
+                    f.unlink(); tmp.rename(f)
+                else:
+                    if tmp.exists(): tmp.unlink()
+                    error(f"✗ Speed failed: {msg}"); step_ok = False
+
+            if step_ok and silence_filt:
+                info(f"[{i}/{len(files)}] Silence {f.name}...")
+                tmp = f.with_suffix(".tmp_sbn_sil.mp3")
+                ok, msg = run_ffmpeg(["-i",str(f),"-af",silence_filt,"-ab",f"{bitrate}k","-map_metadata","0",str(tmp)])
+                if ok and tmp.exists():
+                    f.unlink(); tmp.rename(f)
+                else:
+                    if tmp.exists(): tmp.unlink()
+                    warning(f"⚠ Silence failed (kept compress+speed): {msg}")
+
+            if step_ok:
+                set_mtime(f, mtime)
+                success(f"✓ [{i}/{len(files)}] {f.name}")
+
+    success(f"Batch complete — {len(matches)} folder(s)")
+
+
 def _normalize_headless(folder: Path, preset: str, dry_run: bool, recursive: bool = False) -> None:
     from ui import info, success, error
     from utils.ffmpeg_utils import run_ffmpeg
@@ -537,8 +664,11 @@ def _normalize_headless(folder: Path, preset: str, dry_run: bool, recursive: boo
         _emit_progress(i, total, f.name, "normalize")
         info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
+        from utils.ffmpeg_utils import get_audio_info as _gai2
+        original_br = _gai2(f).get("bitrate_kbps") or 128
         tmp = f.with_suffix(".tmp_norm.mp3")
-        ok, err_msg = run_ffmpeg(["-i", str(f), "-af", filt, "-map_metadata", "0", str(tmp)])
+        ok, err_msg = run_ffmpeg(["-i", str(f), "-af", filt,
+                                   "-ab", f"{original_br}k", "-map_metadata", "0", str(tmp)])
         if ok and tmp.exists():
             f.unlink(); tmp.rename(f); set_mtime(f, mtime)
             success(f"✓ [{i}/{total}] {f.name}")

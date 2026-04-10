@@ -13,8 +13,27 @@ Requirements:
     ffmpeg must be on PATH  (brew/apt/winget install ffmpeg)
 """
 
+import atexit
+import os
 import sys
 from pathlib import Path
+
+
+def _restore_terminal() -> None:
+    """Ensure terminal echo / cursor / settings are restored on exit."""
+    try:
+        # Show cursor (in case Rich hid it during a Progress bar)
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        os.system("stty sane 2>/dev/null")
+    except Exception:
+        pass
+
+
+atexit.register(_restore_terminal)
 
 
 def _check_deps() -> None:
@@ -53,6 +72,7 @@ MENU = [
     ("8", "Export List (CSV)    file inventory with mtime"),
     ("9", "Series Detection     group files into series subfolders"),
     ("n", "Normalize Volume     equalize loudness (EBU R128 loudnorm)"),
+    ("b", "Batch by Folder Name process sp1.25bt64 style subfolders"),
     ("p", "Pipeline             convert→compress→speed→silence→rename"),
     ("t", "Launch TUI           open Textual graphical interface"),
     ("0", "Exit"),
@@ -72,8 +92,9 @@ def _get_op(key: str):
     if key == "7": from operations.merge      import run_merge;     return run_merge
     if key == "8": from operations.export_csv import run_export_csv;return run_export_csv
     if key == "9": from operations.series     import run_series;      return run_series
-    if key == "n": from operations.normalize  import run_normalize;   return run_normalize
-    if key == "p": from operations.pipeline   import run_pipeline;    return run_pipeline
+    if key == "n": from operations.normalize      import run_normalize;      return run_normalize
+    if key == "b": from operations.batch_by_name  import run_batch_by_name;  return run_batch_by_name
+    if key == "p": from operations.pipeline       import run_pipeline;       return run_pipeline
     return None
 
 
