@@ -108,6 +108,25 @@ def extract_sequence_info(stem: str) -> tuple[int | None, str]:
     return None, n
 
 
+def extract_with_pattern(stem: str, pattern: dict) -> tuple[int | None, str]:
+    """Use a custom pattern dict {pattern: regex} to extract (seq, body) from a stem.
+    Falls back to (None, stem) if the regex doesn't match or is invalid."""
+    regex = pattern.get("pattern") if pattern else None
+    if not regex:
+        return None, stem
+    n = normalize_digits(clean_stem(stem.strip()))
+    try:
+        m = re.search(regex, n)
+        if m:
+            seq = int(m.group(1))
+            body = n[:m.start()] + n[m.end():]
+            body = re.sub(r'[_\-]{2,}', '_', body).strip('_- ')
+            return seq, body or n
+    except (re.error, IndexError, ValueError):
+        pass
+    return None, n
+
+
 def body_to_filename(body: str) -> str:
     """'صحيح البخاري' → 'صحيح_البخاري' (spaces→underscores, clean separators)."""
     s = re.sub(r'\s+', '_', body.strip())
@@ -231,7 +250,8 @@ def scan_summary(folder: Path) -> str:
 
 def scan_all_media(folder: Path, recursive: bool = False) -> list[Path]:
     src = folder.rglob("*") if recursive else folder.iterdir()
-    return sorted(f for f in src if f.is_file() and f.suffix.lower() in ALL_MEDIA_EXTS)
+    return sorted(f for f in src if f.is_file() and f.suffix.lower() in ALL_MEDIA_EXTS
+                  and '.tmp_' not in f.name)
 
 
 def scan_non_mp3_media(folder: Path, recursive: bool = False) -> list[Path]:
@@ -239,7 +259,8 @@ def scan_non_mp3_media(folder: Path, recursive: bool = False) -> list[Path]:
     return sorted(f for f in src
                   if f.is_file()
                   and f.suffix.lower() in ALL_MEDIA_EXTS
-                  and f.suffix.lower() != ".mp3")
+                  and f.suffix.lower() != ".mp3"
+                  and '.tmp_' not in f.name)
 
 
 def scan_folders(parent: Path) -> list[Path]:
@@ -260,6 +281,23 @@ def mtime_str(path: Path) -> str:
 
 def set_mtime(path: Path, mtime: float) -> None:
     os.utime(path, (mtime, mtime))
+
+
+# ── Size guard ─────────────────────────────────────────────────────────────────
+
+def replace_if_smaller(original: Path, replacement: Path, mtime: float) -> bool:
+    """Replace `original` with `replacement` only if replacement is strictly smaller.
+    Always restores mtime on the surviving file. Removes replacement if unused.
+    Returns True if replaced."""
+    if replacement.exists() and replacement.stat().st_size < original.stat().st_size:
+        original.unlink()
+        replacement.rename(original)
+        set_mtime(original, mtime)
+        return True
+    if replacement.exists():
+        replacement.unlink()
+    set_mtime(original, mtime)
+    return False
 
 
 # ── Working copy ───────────────────────────────────────────────────────────────

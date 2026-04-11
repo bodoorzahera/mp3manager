@@ -5,31 +5,36 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <meta name="theme-color" content="#0f172a">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
 <title>🎵 MP3 Manager</title>
 <style>
 :root {
-  --bg:       #0f172a;
-  --surface:  #1e293b;
-  --card:     #263245;
-  --border:   #334155;
-  --accent:   #38bdf8;
-  --accent2:  #818cf8;
-  --green:    #4ade80;
-  --red:      #f87171;
+  --bg:       #0b1120;
+  --surface:  #151d2e;
+  --card:     #1c2640;
+  --border:   #2a3550;
+  --accent:   #60a5fa;
+  --accent2:  #a78bfa;
+  --green:    #34d399;
+  --red:      #fb7185;
   --yellow:   #fbbf24;
-  --text:     #e2e8f0;
-  --muted:    #94a3b8;
-  --radius:   12px;
-  --font:     'Segoe UI', Tahoma, system-ui, sans-serif;
+  --text:     #e8edf5;
+  --muted:    #8896ab;
+  --radius:   14px;
+  --font:     'Segoe UI', 'Noto Sans Arabic', Tahoma, system-ui, sans-serif;
+  --glass:    rgba(255,255,255,.04);
+  --shadow:   0 2px 12px rgba(0,0,0,.25);
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; -webkit-font-smoothing: antialiased; }
+::selection { background: var(--accent); color: var(--bg); }
 
 /* ── Layout ── */
 #app { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
-header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-header h1 { font-size: 17px; font-weight: 700; color: var(--accent); }
-header h1 span { color: var(--text); font-weight: 400; font-size: 13px; }
+header { background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%); border-bottom: 1px solid var(--border); padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+header h1 { font-size: 18px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -.02em; }
+header h1 span { -webkit-text-fill-color: var(--text); font-weight: 400; font-size: 13px; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
 .status-dot.running { background: var(--green); animation: pulse 1s infinite; }
 .status-dot.error   { background: var(--red); }
@@ -41,9 +46,9 @@ header h1 span { color: var(--text); font-weight: 400; font-size: 13px; }
 #sidebar { width: 220px; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0; }
 @media(max-width:640px){ #sidebar{ width:100%; position:fixed; bottom:0; left:0; right:0; height:auto; border-top:1px solid var(--border); border-left:none; flex-direction:row; overflow-x:auto; z-index:10; padding:4px; } }
 
-.op-btn { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; border: none; background: none; color: var(--text); font-size: 13px; width: 100%; text-align: right; transition: background .15s; border-radius: 0; }
-.op-btn:hover { background: var(--card); }
-.op-btn.active { background: var(--accent); color: #0f172a; font-weight: 600; border-radius: var(--radius); margin: 2px 6px; width: calc(100% - 12px); }
+.op-btn { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; border: none; background: none; color: var(--text); font-size: 13px; width: 100%; text-align: right; transition: all .2s; border-radius: 0; }
+.op-btn:hover { background: var(--glass); transform: translateX(-2px); }
+.op-btn.active { background: linear-gradient(135deg, var(--accent), #2563eb); color: #fff; font-weight: 600; border-radius: var(--radius); margin: 2px 6px; width: calc(100% - 12px); box-shadow: 0 4px 16px rgba(96,165,250,.25); }
 .op-btn .op-icon { font-size: 16px; flex-shrink: 0; }
 .op-btn .op-label { flex: 1; }
 .op-pipeline { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
@@ -66,13 +71,16 @@ header h1 span { color: var(--text); font-weight: 400; font-size: 13px; }
 #log-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 #log-header { padding: 8px 14px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
 #log-header span { font-size: 12px; color: var(--muted); }
-#log-output { flex: 1; overflow-y: auto; padding: 10px 14px; font-family: 'Courier New', monospace; font-size: 12.5px; line-height: 1.6; direction: ltr; text-align: left; background: #080f1a; }
-#log-output .log-line { padding: 1px 0; }
+#log-output { flex: 1; overflow-y: auto; padding: 10px 14px; font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; font-size: 12px; line-height: 1.7; direction: ltr; text-align: left; background: #060c18; }
+#log-panel.collapsed #log-output { display: none; }
+#log-panel.collapsed #file-list { display: none; }
+#log-panel.collapsed { flex: 0 0 auto; }
+#log-output .log-line { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,.02); }
 .log-ok    { color: var(--green); }
 .log-err   { color: var(--red); }
 .log-warn  { color: var(--yellow); }
 .log-info  { color: var(--muted); }
-.log-head  { color: var(--accent); font-weight: bold; }
+.log-head  { color: var(--accent); font-weight: bold; padding: 4px 0; }
 
 /* ── File list ── */
 #file-list { padding: 0 14px 14px; }
@@ -88,8 +96,9 @@ header h1 span { color: var(--text); font-weight: 400; font-size: 13px; }
 .param-section { margin-bottom: 16px; }
 .param-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.05em; margin-bottom: 6px; display: block; }
 .param-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
-.param-chip { background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px; font-size: 12px; cursor: pointer; transition: all .15s; user-select: none; }
-.param-chip.selected, .param-chip:hover { background: var(--accent); color: #0f172a; border-color: var(--accent); font-weight: 600; }
+.param-chip { background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 5px 14px; font-size: 12px; cursor: pointer; transition: all .2s; user-select: none; }
+.param-chip:hover { background: var(--glass); border-color: var(--accent); color: var(--accent); }
+.param-chip.selected { background: linear-gradient(135deg, var(--accent), #2563eb); color: #fff; border-color: transparent; font-weight: 600; box-shadow: 0 2px 8px rgba(96,165,250,.2); }
 .param-input { width: 100%; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; color: var(--text); font-size: 13px; }
 .param-input:focus { outline: none; border-color: var(--accent); }
 select.param-input { cursor: pointer; }
@@ -107,10 +116,10 @@ select.param-input { cursor: pointer; }
 .stage-status.skip { color: var(--muted); }
 
 /* ── Run button ── */
-#run-btn { width: 100%; padding: 12px; background: var(--green); color: #052e16; border: none; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; margin-top: 12px; transition: all .2s; }
-#run-btn:hover { filter: brightness(1.1); }
-#run-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
-#cancel-btn { width: 100%; padding: 9px; background: var(--red); color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 6px; display: none; }
+#run-btn { width: 100%; padding: 13px; background: linear-gradient(135deg, var(--green), #10b981); color: #052e16; border: none; border-radius: var(--radius); font-size: 15px; font-weight: 800; cursor: pointer; margin-top: 14px; transition: all .2s; box-shadow: 0 4px 20px rgba(52,211,153,.2); letter-spacing: .02em; }
+#run-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(52,211,153,.35); }
+#run-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; box-shadow: none; transform: none; }
+#cancel-btn { width: 100%; padding: 10px; background: linear-gradient(135deg, var(--red), #e11d48); color: #fff; border: none; border-radius: var(--radius); font-size: 13px; font-weight: 700; cursor: pointer; margin-top: 6px; display: none; box-shadow: 0 4px 16px rgba(251,113,133,.2); }
 #cancel-btn.visible { display: block; }
 .dry-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .dry-row label { font-size: 13px; color: var(--muted); cursor: pointer; }
@@ -138,6 +147,17 @@ select.param-input { cursor: pointer; }
 #live-bar-wrap.indeterminate #live-bar-fill { animation: slide 1.5s infinite; width: 30%; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
 #live-pct { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 10px; font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.5); }
 #live-counter { font-size: 12px; color: var(--muted); margin-top: 6px; display: flex; justify-content: space-between; }
+
+/* ── Install banner ── */
+#install-banner { display: none; background: linear-gradient(135deg, #1e1b4b, #312e81); border-bottom: 2px solid var(--accent2); padding: 10px 16px; align-items: center; gap: 10px; flex-shrink: 0; }
+#install-banner.show { display: flex; animation: fadeIn .3s; }
+#install-banner span { color: var(--text); font-size: 13px; flex: 1; }
+#install-btn { background: linear-gradient(135deg, var(--accent2), #6366f1); color: #fff; border: none; border-radius: 8px; padding: 6px 16px; font-size: 12px; font-weight: 700; cursor: pointer; }
+#install-dismiss { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; }
+
+/* ── Log toggle ── */
+.log-toggle { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 14px; padding: 2px 6px; transition: transform .2s; }
+#log-panel.collapsed .log-toggle { transform: rotate(180deg); }
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 4px; }
@@ -179,6 +199,13 @@ select.param-input { cursor: pointer; }
 </head>
 <body>
 <div id="app">
+
+<!-- Install banner -->
+<div id="install-banner">
+  <span>📲 ثبّت التطبيق على جهازك للوصول السريع</span>
+  <button id="install-btn" onclick="installPWA()">تثبيت</button>
+  <button id="install-dismiss" onclick="dismissInstall()">✕</button>
+</div>
 
 <!-- Header -->
 <header>
@@ -265,11 +292,14 @@ select.param-input { cursor: pointer; }
 
       <!-- Log -->
       <div id="log-panel">
-        <div id="log-header">
-          <strong style="font-size:13px">📋 السجل</strong>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span id="log-count">0 سطر</span>
-            <button onclick="downloadLog()" title="تحميل السجل" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px">⬇ سجل</button>
+        <div id="log-header" style="cursor:pointer" onclick="toggleLog()">
+          <div style="display:flex;align-items:center;gap:8px">
+            <button class="log-toggle" title="طي/بسط السجل">▼</button>
+            <strong style="font-size:13px">📋 السجل</strong>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center" onclick="event.stopPropagation()">
+            <span id="log-count" style="font-size:11px;color:var(--muted)">0 سطر</span>
+            <button onclick="downloadLog()" title="تحميل السجل" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px">⬇</button>
             <button onclick="clearLog()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px">مسح</button>
           </div>
         </div>
@@ -353,6 +383,7 @@ let eventSource = null;
 let logLines = 0;
 let prefs = {};
 let _presets = {};
+let _aiPattern = null;
 let _logBuffer = [];
 let _resumeClicked = false;
 let _startTime = 0;
@@ -522,8 +553,17 @@ function navigateToCopy() {
 }
 
 function esc(path) {
-  // Escape single quotes for inline onclick
+  // Escape single quotes for inline onclick attributes
   return path.replace(/'/g, "\\'");
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // ── History ───────────────────────────────────────────────────────────────────
@@ -618,8 +658,8 @@ function renderFileList(mp3s, others, dirs) {
     dirs.forEach(d => {
       html += `<div class="file-item">
         <span class="file-name" style="cursor:pointer;color:var(--accent)"
-          onclick="navigateTo('${d.path || d.name}')">${d.name}/</span>
-        <span class="file-meta">${d.mtime||''}</span></div>`;
+          onclick="navigateTo('${esc(d.path || d.name)}')">${escHtml(d.name)}/</span>
+        <span class="file-meta">${escHtml(d.mtime||'')}</span></div>`;
     });
   }
 
@@ -628,8 +668,8 @@ function renderFileList(mp3s, others, dirs) {
     mp3s.forEach(f => {
       html += `<div class="file-item">
         <div class="file-status" id="${safeId(f.name)}"></div>
-        <span class="file-name" title="${f.name}">${f.name}</span>
-        <span class="file-meta">${f.duration||''} ${f.size_human}</span></div>`;
+        <span class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</span>
+        <span class="file-meta">${escHtml(f.duration||'')} ${escHtml(f.size_human)}</span></div>`;
     });
   }
 
@@ -637,8 +677,8 @@ function renderFileList(mp3s, others, dirs) {
     html += '<h3>🎬 ملفات أخرى</h3>';
     others.forEach(f => {
       html += `<div class="file-item">
-        <span class="file-name">${f.name}</span>
-        <span class="file-meta">${f.ext}</span></div>`;
+        <span class="file-name">${escHtml(f.name)}</span>
+        <span class="file-meta">${escHtml(f.ext)}</span></div>`;
     });
   }
 
@@ -652,8 +692,73 @@ function navigateTo(name) {
   loadFolder();
 }
 
+// ── AI Pattern (external AI workflow) ─────────────────────────────────────────
+function copyAiPrompt() {
+  const items = [...document.querySelectorAll('#file-list .file-name')]
+    .map(el => el.textContent.replace(/\/$/, '').trim())
+    .filter(Boolean);
+  if (!items.length) { toast('حمّل مجلداً أولاً'); return; }
+  const fileList = items.slice(0, 60).join('\n');
+  const prompt =
+`أنا أريد منك تحليل أسماء الملفات الصوتية هذه واستخراج النمط الذي يحدد رقم الحلقة أو التسلسل.
+
+أعطني JSON فقط بهذا الشكل بدون أي شرح إضافي:
+{
+  "pattern": "تعبير Python regex فيه مجموعة التقاط واحدة (\\\\d+) لرقم التسلسل",
+  "description": "وصف مختصر للنمط بالعربي",
+  "examples": [
+    {"filename": "اسم_الملف", "number": 1},
+    {"filename": "اسم_الملف_2", "number": 2},
+    {"filename": "اسم_الملف_3", "number": 3}
+  ]
+}
+
+إذا لم يكن هناك نمط متسق، اجعل pattern: null
+
+قائمة الملفات:
+${fileList}`;
+  navigator.clipboard.writeText(prompt)
+    .then(() => toast('✓ تم نسخ الـ Prompt — الصقه في أي ذكاء اصطناعي'))
+    .catch(() => toast('تعذر النسخ التلقائي'));
+}
+
+function applyAiPattern() {
+  const raw = document.getElementById('ai-pattern-input')?.value.trim();
+  if (!raw) { toast('الصق JSON أولاً'); return; }
+  let data;
+  try {
+    const match = raw.match(/\{[\s\S]*\}/);
+    data = JSON.parse(match ? match[0] : raw);
+  } catch {
+    toast('✗ JSON غير صالح — تحقق من الصياغة');
+    return;
+  }
+  if (!data.pattern) { toast('لم يُعثر على نمط متسق في JSON'); return; }
+  try { new RegExp(data.pattern); } catch { toast('✗ التعبير النمطي (regex) غير صالح'); return; }
+  _aiPattern = data;
+  const preview = document.getElementById('ai-pattern-preview');
+  document.getElementById('ai-pattern-preview-desc').textContent =
+    `✓ ${data.description || data.pattern}`;
+  document.getElementById('ai-pattern-preview-samples').innerHTML =
+    (data.examples || []).map(e =>
+      `<span style="color:var(--accent)">${escHtml(String(e.filename))}</span> ← رقم ${e.number}`
+    ).join('<br>');
+  if (preview) preview.style.display = 'block';
+  toast('✓ تم تطبيق النمط المخصص');
+}
+
+function clearAiPattern() {
+  _aiPattern = null;
+  const preview = document.getElementById('ai-pattern-preview');
+  const input = document.getElementById('ai-pattern-input');
+  if (preview) preview.style.display = 'none';
+  if (input) input.value = '';
+  toast('تم إلغاء النمط المخصص');
+}
+
 // ── Operation selector ────────────────────────────────────────────────────────
 function selectOp(op) {
+  _aiPattern = null;
   currentOp = op;
   document.querySelectorAll('.op-btn').forEach(b => b.classList.remove('active'));
   const btn = document.querySelector(`[data-op="${op}"]`);
@@ -714,6 +819,27 @@ function renderParams(op) {
             ${['حذف الكل','حذف التسلسلية','إبقاء الكل'][i]}</div>`).join('')}
         </div>
         <input type="hidden" id="number_action" value="${prefs.number_action||'3'}">
+      </div>
+      <div class="param-section" style="margin-top:12px">
+        <span class="param-label">نمط مخصص (من الذكاء الاصطناعي)</span>
+        <button class="btn-run" onclick="copyAiPrompt()"
+          style="width:100%;margin-top:6px;background:var(--surface);border:1px solid var(--border);color:var(--text)">
+          📋 انسخ قائمة الأسماء مع الـ Prompt
+        </button>
+        <textarea id="ai-pattern-input" placeholder="الصق هنا JSON الناتج من الذكاء الاصطناعي..."
+          style="width:100%;margin-top:8px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--text);font-size:11px;font-family:monospace;resize:vertical;min-height:80px;direction:ltr"></textarea>
+        <button class="btn-run" onclick="applyAiPattern()"
+          style="width:100%;margin-top:4px;background:var(--accent2)">
+          ✓ تحقق وطبّق النمط
+        </button>
+        <div id="ai-pattern-preview" style="display:none;margin-top:8px;padding:8px;background:var(--card);border-radius:8px;border:1px solid var(--green)">
+          <div id="ai-pattern-preview-desc" style="font-size:12px;color:var(--green);margin-bottom:4px"></div>
+          <div id="ai-pattern-preview-samples" style="font-size:11px;color:var(--muted);line-height:1.8"></div>
+          <button onclick="clearAiPattern()"
+            style="margin-top:6px;width:100%;background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);cursor:pointer;padding:4px">
+            × إلغاء النمط المخصص
+          </button>
+        </div>
       </div>`,
 
     compress: `
@@ -930,7 +1056,7 @@ function getParams() {
   }
 
   const map = {
-    rename:    { number_action: g('number_action') },
+    rename:    { number_action: g('number_action'), ...(_aiPattern ? { ai_pattern: _aiPattern } : {}) },
     compress:  { bitrate: gn('bitrate') },
     speed:     { speed:   gn('speed')   },
     split:     { split_dur: g('split_dur'), after_split: g('after_split') },
@@ -995,7 +1121,8 @@ function startSSE() {
   eventSource = new EventSource(`${API}/api/stream`);
 
   eventSource.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.type === 'ping') return;
     if (msg.type === 'log' ) { appendLog(msg.text); return; }
     if (msg.type === 'progress') {
@@ -1271,6 +1398,47 @@ function toast(msg) {
   el.classList.add('show');
   setTimeout(() => el.classList.remove('show'), 2500);
 }
+
+// ── Log toggle ────────────────────────────────────────────────────────────────
+function toggleLog() {
+  document.getElementById('log-panel').classList.toggle('collapsed');
+}
+
+// ── PWA Install ───────────────────────────────────────────────────────────────
+let _deferredPrompt = null;
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  _deferredPrompt = e;
+  if (!localStorage.getItem('pwa_dismissed')) {
+    document.getElementById('install-banner').classList.add('show');
+  }
+});
+
+async function installPWA() {
+  if (!_deferredPrompt) return;
+  _deferredPrompt.prompt();
+  const result = await _deferredPrompt.userChoice;
+  if (result.outcome === 'accepted') {
+    toast('✓ جاري التثبيت...');
+  }
+  _deferredPrompt = null;
+  document.getElementById('install-banner').classList.remove('show');
+}
+
+function dismissInstall() {
+  document.getElementById('install-banner').classList.remove('show');
+  localStorage.setItem('pwa_dismissed', '1');
+}
+
+window.addEventListener('appinstalled', () => {
+  document.getElementById('install-banner').classList.remove('show');
+  toast('✓ تم تثبيت التطبيق');
+});
 </script>
 </body>
 </html>

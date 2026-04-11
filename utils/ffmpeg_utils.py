@@ -109,6 +109,14 @@ def parse_duration(s: str) -> int:
     return total
 
 
+# ── Silence filter ─────────────────────────────────────────────────────────────
+
+def build_silence_filter(min_sec: float, db: int) -> str:
+    """Build ffmpeg silenceremove filter (strips leading and trailing silence)."""
+    part = f"silenceremove=start_periods=1:start_threshold={db}dB:start_duration={min_sec}"
+    return f"{part},areverse,{part},areverse"
+
+
 # ── atempo chain for speed outside [0.5, 2.0] ──────────────────────────────────
 
 def build_atempo_filter(speed: float) -> str:

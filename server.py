@@ -105,12 +105,16 @@ async def folder_info(path: str = ".", recursive: bool = False):
     except PermissionError as e:
         return JSONResponse({"error": str(e)}, status_code=403)
 
-    def _file_info(f: Path) -> dict:
+    def _file_info(f: Path) -> dict | None:
+        try:
+            st = f.stat()
+        except (FileNotFoundError, OSError):
+            return None
         ai = get_audio_info(f) if f.suffix.lower() in {".mp3",".wav",".flac",".m4a"} else {}
         return {
             "name": f.name,
-            "size": f.stat().st_size,
-            "size_human": human_size(f.stat().st_size),
+            "size": st.st_size,
+            "size_human": human_size(st.st_size),
             "mtime": mtime_str(f),
             "duration": format_duration(ai.get("duration_sec", 0)) if ai else "",
             "bitrate": ai.get("bitrate_kbps", 0) if ai else 0,
@@ -123,7 +127,7 @@ async def folder_info(path: str = ".", recursive: bool = False):
         "mp3_count": len(mp3s),
         "other_media_count": len(others),
         "subfolder_count": len(sub_dirs),
-        "mp3_files": [_file_info(f) for f in mp3s[:50]],
+        "mp3_files": [info for f in mp3s[:50] if (info := _file_info(f))],
         "other_files": [{"name": f.name, "ext": f.suffix.upper()} for f in others[:20]],
         "subfolders": [{"name": d.name, "mtime": mtime_str(d)} for d in sub_dirs[:20]],
         "ffmpeg_ok": check_ffmpeg(),
@@ -168,7 +172,7 @@ async def run_operation(request: Request):
     # Clear queue
     while not _log_queue.empty():
         try: _log_queue.get_nowait()
-        except: pass
+        except queue.Empty: pass
 
     prefs = load_prefs()
     _apply_params_to_prefs(params, prefs)
@@ -191,104 +195,10 @@ async def run_operation(request: Request):
         "status": "running",
     })
 
-    def _folder_size(p):
-        try:
-            return sum(f.stat().st_size for f in Path(p).rglob('*') if f.is_file())
-        except Exception:
-            return 0
-
-    def _worker():
-        global _log_file_handle
-
-        # ── Cancellable ffmpeg ─────────────────────────────────────────────────
-        import utils.ffmpeg_utils as _fu
-        _orig_run_ffmpeg = _fu.run_ffmpeg
-
-        def _cancellable_run_ffmpeg(args: list[str]) -> tuple[bool, str]:
-            cmd = ["ffmpeg", "-y", "-loglevel", "error"] + args
-            proc = _subprocess.Popen(cmd, stdout=_subprocess.PIPE,
-                                     stderr=_subprocess.PIPE, text=True)
-            cf = _run_state["cancel_flag"]
-            while proc.poll() is None:
-                if cf.is_set():
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=3)
-                    except _subprocess.TimeoutExpired:
-                        proc.kill()
-                    return False, "Cancelled"
-                time.sleep(0.1)
-            _, stderr = proc.communicate()
-            return proc.returncode == 0, stderr.strip()
-
-        _fu.run_ffmpeg = _cancellable_run_ffmpeg
-
-        # ── Log to file ───────────────────────────────────────────────────────
-        log_dir = folder / ".mp3manager_logs"
-        try:
-            log_dir.mkdir(exist_ok=True)
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_path = log_dir / f"{ts}_{op}.txt"
-            _log_file_handle = open(log_path, "w", encoding="utf-8")
-            _log_file_handle.write(
-                f"# MP3 Manager log — {op} — {datetime.datetime.now()}\n"
-                f"# Folder: {folder}\n\n"
-            )
-        except Exception:
-            _log_file_handle = None
-
-        size_before = 0
-        work_folder = folder
-
-        try:
-            _log_queue.put({"type": "start", "operation": op})
-
-            # ── Optional working copy ─────────────────────────────────────────
-            if params.get("make_copy"):
-                from utils.file_utils import make_working_copy
-                _log_queue.put({"type": "log", "text": "→ Creating working copy..."})
-                try:
-                    work_folder = make_working_copy(folder)
-                    _run_state["copy_path"] = str(work_folder)
-                    _log_queue.put({"type": "log",  "text": f"✓ Copy: {work_folder}"})
-                    _log_queue.put({"type": "copy", "path": str(work_folder)})
-                except Exception as ce:
-                    _log_queue.put({"type": "log", "text": f"[red]✗ Copy failed: {ce} — using original[/]"})
-
-            size_before = _folder_size(work_folder)
-            _dispatch(op, work_folder, params, prefs, dry_run)
-            save_prefs(prefs)
-        except Exception as e:
-            _log_queue.put({"type": "log", "text": f"[red]Error: {e}[/]"})
-            _log_queue.put({"type": "log", "text": traceback.format_exc(limit=3)})
-        finally:
-            _fu.run_ffmpeg = _orig_run_ffmpeg
-            if _log_file_handle:
-                try:
-                    _log_file_handle.close()
-                except Exception:
-                    pass
-                _log_file_handle = None
-            _run_state["running"] = False
-            elapsed = round(time.time() - _run_state["started_at"], 1)
-            size_after = _folder_size(work_folder)
-            save_last_run({
-                "operation": op,
-                "folder": str(folder),
-                "params": params,
-                "dry_run": dry_run,
-                "status": "done",
-                "elapsed": elapsed,
-            })
-            _log_queue.put({
-                "type": "done",
-                "elapsed": elapsed,
-                "copy_path": _run_state.get("copy_path", ""),
-                "size_before": size_before,
-                "size_after": size_after,
-            })
-
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(
+        target=_run_worker, args=(op, folder, params, prefs, dry_run),
+        daemon=True,
+    ).start()
     return {"status": "started", "operation": op}
 
 
@@ -355,7 +265,7 @@ async def resume_last():
     # Re-use the normal run endpoint logic
     while not _log_queue.empty():
         try: _log_queue.get_nowait()
-        except: pass
+        except queue.Empty: pass
 
     prefs = load_prefs()
     _apply_params_to_prefs(params, prefs)
@@ -367,75 +277,14 @@ async def resume_last():
     _run_state["cancel_flag"].clear()
     save_last_run({**last, "status": "running"})
 
-    def _resume_worker():
-        global _log_file_handle
-        import utils.ffmpeg_utils as _fu
-        _orig = _fu.run_ffmpeg
-
-        def _cancellable(args):
-            cmd = ["ffmpeg", "-y", "-loglevel", "error"] + args
-            proc = _subprocess.Popen(cmd, stdout=_subprocess.PIPE,
-                                     stderr=_subprocess.PIPE, text=True)
-            cf = _run_state["cancel_flag"]
-            while proc.poll() is None:
-                if cf.is_set():
-                    proc.terminate()
-                    try: proc.wait(timeout=3)
-                    except _subprocess.TimeoutExpired: proc.kill()
-                    return False, "Cancelled"
-                time.sleep(0.1)
-            _, stderr = proc.communicate()
-            return proc.returncode == 0, stderr.strip()
-
-        _fu.run_ffmpeg = _cancellable
-        log_dir = folder / ".mp3manager_logs"
-        try:
-            log_dir.mkdir(exist_ok=True)
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            _log_file_handle = open(log_dir / f"{ts}_{op}_resume.txt", "w", encoding="utf-8")
-        except Exception:
-            _log_file_handle = None
-
-        size_before = 0
-        work_folder = folder
-
-        def _rfs(p):
-            try: return sum(f.stat().st_size for f in Path(p).rglob('*') if f.is_file())
-            except: return 0
-
-        try:
-            _log_queue.put({"type": "start", "operation": op})
-            _log_queue.put({"type": "log",   "text": f"↩ Resuming: {op} on {folder}"})
-            if params.get("make_copy"):
-                from utils.file_utils import make_working_copy
-                try:
-                    work_folder = make_working_copy(folder)
-                    _run_state["copy_path"] = str(work_folder)
-                    _log_queue.put({"type": "log",  "text": f"✓ Copy: {work_folder}"})
-                    _log_queue.put({"type": "copy", "path": str(work_folder)})
-                except Exception as ce:
-                    _log_queue.put({"type": "log", "text": f"[red]Copy failed: {ce}[/]"})
-            size_before = _rfs(work_folder)
-            _dispatch(op, work_folder, params, prefs, dry_run)
-            save_prefs(prefs)
-        except Exception as e:
-            _log_queue.put({"type": "log", "text": f"[red]Error: {e}[/]"})
-            _log_queue.put({"type": "log", "text": traceback.format_exc(limit=3)})
-        finally:
-            _fu.run_ffmpeg = _orig
-            if _log_file_handle:
-                try: _log_file_handle.close()
-                except: pass
-                _log_file_handle = None
-            _run_state["running"] = False
-            elapsed = round(time.time() - _run_state["started_at"], 1)
-            size_after = _rfs(work_folder)
-            save_last_run({**last, "status": "done", "elapsed": elapsed})
-            _log_queue.put({"type": "done", "elapsed": elapsed,
-                            "copy_path": _run_state.get("copy_path", ""),
-                            "size_before": size_before, "size_after": size_after})
-
-    threading.Thread(target=_resume_worker, daemon=True).start()
+    threading.Thread(
+        target=_run_worker,
+        args=(op, folder, params, prefs, dry_run),
+        kwargs={"log_suffix": "resume",
+                "resume_msg": f"↩ Resuming: {op} on {folder}",
+                "last_run_base": last},
+        daemon=True,
+    ).start()
     return {"status": "resuming", "operation": op, "folder": str(folder)}
 
 
@@ -443,6 +292,118 @@ async def resume_last():
 async def cancel_run():
     _run_state["cancel_flag"].set()
     return {"status": "cancel_requested"}
+
+
+# ── Shared worker ──────────────────────────────────────────────────────────────
+
+def _run_worker(
+    op: str,
+    folder: Path,
+    params: dict,
+    prefs: dict,
+    dry_run: bool,
+    *,
+    log_suffix: str = "",
+    resume_msg: str | None = None,
+    last_run_base: dict | None = None,
+) -> None:
+    """Cancellable worker thread shared by run_operation and resume_last."""
+    global _log_file_handle
+    import utils.ffmpeg_utils as _fu
+    _orig_run_ffmpeg = _fu.run_ffmpeg
+
+    def _cancellable(args: list[str]) -> tuple[bool, str]:
+        cmd = ["ffmpeg", "-y", "-loglevel", "error"] + args
+        proc = _subprocess.Popen(cmd, stdout=_subprocess.PIPE,
+                                 stderr=_subprocess.PIPE, text=True)
+        cf = _run_state["cancel_flag"]
+        while proc.poll() is None:
+            if cf.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except _subprocess.TimeoutExpired:
+                    proc.kill()
+                return False, "Cancelled"
+            time.sleep(0.1)
+        _, stderr = proc.communicate()
+        return proc.returncode == 0, stderr.strip()
+
+    _fu.run_ffmpeg = _cancellable
+
+    log_dir = folder / ".mp3manager_logs"
+    try:
+        log_dir.mkdir(exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = f"_{log_suffix}" if log_suffix else ""
+        _log_file_handle = open(log_dir / f"{ts}_{op}{suffix}.txt", "w", encoding="utf-8")
+        _log_file_handle.write(
+            f"# MP3 Manager log — {op} — {datetime.datetime.now()}\n"
+            f"# Folder: {folder}\n\n"
+        )
+    except Exception:
+        _log_file_handle = None
+
+    def _folder_size(p: Path) -> int:
+        try:
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        except Exception:
+            return 0
+
+    size_before = 0
+    work_folder = folder
+
+    try:
+        _log_queue.put({"type": "start", "operation": op})
+        if resume_msg:
+            _log_queue.put({"type": "log", "text": resume_msg})
+
+        if params.get("make_copy"):
+            from utils.file_utils import make_working_copy
+            _log_queue.put({"type": "log", "text": "→ Creating working copy..."})
+            try:
+                work_folder = make_working_copy(folder)
+                _run_state["copy_path"] = str(work_folder)
+                _log_queue.put({"type": "log",  "text": f"✓ Copy: {work_folder}"})
+                _log_queue.put({"type": "copy", "path": str(work_folder)})
+            except Exception as ce:
+                _log_queue.put({"type": "log",
+                                "text": f"[red]✗ Copy failed: {ce} — using original[/]"})
+
+        size_before = _folder_size(work_folder)
+        _dispatch(op, work_folder, params, prefs, dry_run)
+        save_prefs(prefs)
+    except Exception as e:
+        _log_queue.put({"type": "log", "text": f"[red]Error: {e}[/]"})
+        _log_queue.put({"type": "log", "text": traceback.format_exc(limit=3)})
+    finally:
+        _fu.run_ffmpeg = _orig_run_ffmpeg
+        if _log_file_handle:
+            try:
+                _log_file_handle.close()
+            except OSError:
+                pass
+            _log_file_handle = None
+        _run_state["running"] = False
+        elapsed = round(time.time() - _run_state["started_at"], 1)
+        size_after = _folder_size(work_folder)
+        base = last_run_base or {}
+        save_last_run({
+            **base,
+            "operation": op,
+            "folder": str(folder),
+            "params": params,
+            "dry_run": dry_run,
+            "status": "done",
+            "elapsed": elapsed,
+        })
+        _log_queue.put({
+            "type": "done",
+            "elapsed": elapsed,
+            "copy_path": _run_state.get("copy_path", ""),
+            "size_before": size_before,
+            "size_after": size_after,
+        })
 
 
 # ── Operation dispatch ─────────────────────────────────────────────────────────
@@ -561,13 +522,12 @@ def _compress_headless(folder: Path, bitrate: int, dry_run: bool, recursive: boo
 
     ok_n = err_n = 0
     def _one(f):
+        from utils.file_utils import replace_if_smaller
         mtime = get_mtime(f)
         tmp = f.with_suffix(".tmp_cmp.mp3")
         ok, err_msg = run_ffmpeg(["-i",str(f),"-ab",f"{bitrate}k","-map_metadata","0",str(tmp)])
-        if ok and tmp.exists():
-            f.unlink(); tmp.rename(f)
-            from utils.file_utils import set_mtime
-            set_mtime(f, mtime)
+        if ok:
+            replace_if_smaller(f, tmp, mtime)
             return True, f.name
         if tmp.exists(): tmp.unlink()
         return False, f"{f.name}: {err_msg}"
@@ -588,7 +548,7 @@ def _compress_headless(folder: Path, bitrate: int, dry_run: bool, recursive: boo
 def _speed_headless(folder: Path, speed: float, dry_run: bool, recursive: bool = False) -> None:
     from ui import info, success, error
     from utils.ffmpeg_utils import run_ffmpeg, build_atempo_filter
-    from utils.file_utils import set_mtime
+    from utils.file_utils import replace_if_smaller
 
     files = scan_mp3s(folder, recursive=recursive)
     if not files:
@@ -603,18 +563,12 @@ def _speed_headless(folder: Path, speed: float, dry_run: bool, recursive: bool =
         _emit_progress(i, total, f.name, "speed")
         info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
-        from utils.ffmpeg_utils import get_audio_info as _gai3
-        original_br = _gai3(f).get("bitrate_kbps") or 128
-        old_size = f.stat().st_size
+        original_br = get_audio_info(f).get("bitrate_kbps") or 128
         tmp = f.with_suffix(".tmp_spd.mp3")
         ok, err_msg = run_ffmpeg(["-i",str(f),"-filter:a",atempo,
                                    "-ab",f"{original_br}k","-map_metadata","0",str(tmp)])
-        if ok and tmp.exists():
-            if tmp.stat().st_size > old_size:
-                tmp.unlink()  # keep original
-            else:
-                f.unlink(); tmp.rename(f)
-            set_mtime(f, mtime)
+        if ok:
+            replace_if_smaller(f, tmp, mtime)
             success(f"✓ [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
@@ -630,17 +584,14 @@ def _split_headless(folder: Path, dur_str: str, after: str, dry_run: bool) -> No
 
 def _silence_headless(folder: Path, min_sec: float, db: int, dry_run: bool, recursive: bool = False) -> None:
     from ui import info, success, error
-    from utils.ffmpeg_utils import run_ffmpeg
-    from utils.file_utils import set_mtime
+    from utils.ffmpeg_utils import run_ffmpeg, build_silence_filter
+    from utils.file_utils import replace_if_smaller
 
     files = scan_mp3s(folder, recursive=recursive)
     if not files:
         error(f"No MP3 files  |  {scan_summary(folder)}"); return
 
-    filt = (f"silenceremove=start_periods=1:start_threshold={db}dB:start_duration={min_sec},"
-            f"areverse,"
-            f"silenceremove=start_periods=1:start_threshold={db}dB:start_duration={min_sec},"
-            f"areverse")
+    filt = build_silence_filter(min_sec, db)
     total = len(files)
     info(f"Remove silence >{min_sec}s/{db}dB from {total} files")
     if dry_run: success("Dry run done."); return
@@ -649,18 +600,12 @@ def _silence_headless(folder: Path, min_sec: float, db: int, dry_run: bool, recu
         _emit_progress(i, total, f.name, "silence")
         info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
-        from utils.ffmpeg_utils import get_audio_info as _gai
-        original_br = (_gai(f).get("bitrate_kbps") or 128)
-        old_size = f.stat().st_size
+        original_br = get_audio_info(f).get("bitrate_kbps") or 128
         tmp = f.with_suffix(".tmp_sil.mp3")
         ok, err_msg = run_ffmpeg(["-i",str(f),"-af",filt,
                                    "-ab",f"{original_br}k","-map_metadata","0",str(tmp)])
-        if ok and tmp.exists():
-            if tmp.stat().st_size > old_size:
-                tmp.unlink()
-            else:
-                f.unlink(); tmp.rename(f)
-            set_mtime(f, mtime)
+        if ok:
+            replace_if_smaller(f, tmp, mtime)
             success(f"✓ [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
@@ -700,7 +645,7 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
     """Non-interactive rename — same logic as pipeline's _run_rename_stage."""
     from ui import info, success, error
     from utils.file_utils import (
-        scan_mp3s, extract_sequence_info, body_to_filename,
+        scan_mp3s, extract_sequence_info, extract_with_pattern, body_to_filename,
         apply_number_action, backup_names, clean_stem, set_mtime,
     )
     import time as _time
@@ -710,6 +655,7 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
         error(f"No MP3 files  |  {scan_summary(folder)}"); return
 
     number_action = params.get("number_action", prefs.get("number_action", "3"))
+    ai_pattern = params.get("ai_pattern")  # custom pattern from external AI, or None
 
     def clean_body(raw: str) -> str:
         b = clean_stem(raw)
@@ -718,7 +664,10 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
 
     with_seq, no_seq = [], []
     for f in files:
-        seq, body = extract_sequence_info(f.stem)
+        if ai_pattern:
+            seq, body = extract_with_pattern(f.stem, ai_pattern)
+        else:
+            seq, body = extract_sequence_info(f.stem)
         if seq is not None:
             with_seq.append((seq, body, f))
         else:
@@ -788,7 +737,7 @@ def _batch_by_name_headless(
 ) -> None:
     from operations.batch_by_name import parse_folder_settings
     from ui import info, success, error, warning
-    from utils.ffmpeg_utils import run_ffmpeg, build_atempo_filter, get_audio_info
+    from utils.ffmpeg_utils import run_ffmpeg, build_atempo_filter, build_silence_filter, get_audio_info
     from utils.file_utils import set_mtime
 
     try:
@@ -815,14 +764,7 @@ def _batch_by_name_headless(
     if dry_run:
         success("Dry run done."); return
 
-    silence_filt = (
-        f"silenceremove=start_periods=1:start_threshold={silence_db}dB"
-        f":start_duration={silence_sec},"
-        f"areverse,"
-        f"silenceremove=start_periods=1:start_threshold={silence_db}dB"
-        f":start_duration={silence_sec},"
-        f"areverse"
-    ) if do_silence else None
+    silence_filt = build_silence_filter(silence_sec, silence_db) if do_silence else None
 
     global_i = 0
     for d, speed, bitrate, _ in matches:
@@ -878,7 +820,7 @@ def _batch_by_name_headless(
 def _normalize_headless(folder: Path, preset: str, dry_run: bool, recursive: bool = False) -> None:
     from ui import info, success, error
     from utils.ffmpeg_utils import run_ffmpeg
-    from utils.file_utils import set_mtime
+    from utils.file_utils import replace_if_smaller
     from operations.normalize import LOUDNORM_PRESETS
 
     files = scan_mp3s(folder, recursive=recursive)
@@ -898,18 +840,12 @@ def _normalize_headless(folder: Path, preset: str, dry_run: bool, recursive: boo
         _emit_progress(i, total, f.name, "normalize")
         info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
-        from utils.ffmpeg_utils import get_audio_info as _gai2
-        original_br = _gai2(f).get("bitrate_kbps") or 128
-        old_size = f.stat().st_size
+        original_br = get_audio_info(f).get("bitrate_kbps") or 128
         tmp = f.with_suffix(".tmp_norm.mp3")
         ok, err_msg = run_ffmpeg(["-i", str(f), "-af", filt,
                                    "-ab", f"{original_br}k", "-map_metadata", "0", str(tmp)])
-        if ok and tmp.exists():
-            if tmp.stat().st_size > old_size:
-                tmp.unlink()
-            else:
-                f.unlink(); tmp.rename(f)
-            set_mtime(f, mtime)
+        if ok:
+            replace_if_smaller(f, tmp, mtime)
             success(f"✓ [{i}/{total}] {f.name}")
         else:
             if tmp.exists(): tmp.unlink()
@@ -963,6 +899,24 @@ async def serve_pwa():
     if pwa_path.exists():
         return HTMLResponse(pwa_path.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>PWA not found — run build first</h1>", status_code=404)
+
+
+@app.get("/manifest.json")
+async def serve_manifest():
+    mp = Path(__file__).parent / "pwa" / "manifest.json"
+    if mp.exists():
+        return JSONResponse(json.loads(mp.read_text(encoding="utf-8")),
+                            headers={"Content-Type": "application/manifest+json"})
+    return JSONResponse({}, status_code=404)
+
+
+@app.get("/sw.js")
+async def serve_sw():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        "self.addEventListener('fetch', e => e.respondWith(fetch(e.request)));",
+        media_type="application/javascript",
+    )
 
 
 @app.get("/api/prefs")

@@ -19,7 +19,7 @@ from rich.progress import (
 from config import save_session, clear_session, save_prefs
 from ui import console, header, success, warning, error, info, ask, confirm
 from utils.ffmpeg_utils import get_audio_info, run_ffmpeg, format_duration
-from utils.file_utils import scan_mp3s, human_size, get_mtime, set_mtime
+from utils.file_utils import scan_mp3s, human_size, get_mtime, set_mtime, replace_if_smaller
 
 COMMON_BITRATES = [32, 48, 64, 96, 128, 192, 256, 320]
 
@@ -134,10 +134,8 @@ def run_compress(
             "-map_metadata", "0",
             str(tmp),
         ])
-        if ok and tmp.exists():
-            f.unlink()
-            tmp.rename(f)
-            set_mtime(f, mtime)
+        if ok:
+            replace_if_smaller(f, tmp, mtime)
             return True, f.name
         if tmp.exists():
             tmp.unlink()
