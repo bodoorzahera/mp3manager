@@ -22,7 +22,7 @@ from rich import box
 from config import save_prefs
 from ui import console, header, success, warning, error, info, choose, confirm
 from utils.file_utils import (
-    scan_mp3s, extract_sequence_info, body_to_filename,
+    scan_mp3s, extract_sequence_info, extract_with_pattern, body_to_filename,
     apply_number_action, get_mtime, set_mtime,
     backup_names, restore_names, normalize_digits, clean_stem,
 )
@@ -56,9 +56,14 @@ def run_rename(folder: Path, prefs: dict, dry_run: bool = False, recursive: bool
     # ── Extract sequence info ─────────────────────────────────────────────────
     with_seq: list[tuple[int, str, Path]] = []
     no_seq:   list[tuple[str, Path]]      = []
+    ai_pattern = prefs.get("ai_pattern")
 
     for f in files:
         seq, body = extract_sequence_info(f.stem)
+        if ai_pattern:
+            ai_seq, ai_body = extract_with_pattern(f.stem, ai_pattern)
+            if ai_seq is not None:
+                seq, body = ai_seq, ai_body
         if seq is not None:
             with_seq.append((seq, body, f))
         else:

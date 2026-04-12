@@ -664,10 +664,11 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
 
     with_seq, no_seq = [], []
     for f in files:
+        seq, body = extract_sequence_info(f.stem)
         if ai_pattern:
-            seq, body = extract_with_pattern(f.stem, ai_pattern)
-        else:
-            seq, body = extract_sequence_info(f.stem)
+            ai_seq, ai_body = extract_with_pattern(f.stem, ai_pattern)
+            if ai_seq is not None:
+                seq, body = ai_seq, ai_body
         if seq is not None:
             with_seq.append((seq, body, f))
         else:

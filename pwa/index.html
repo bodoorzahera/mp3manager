@@ -398,6 +398,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     const r = await fetch(`${API}/api/prefs`);
     prefs = await r.json();
+    if (prefs.ai_pattern) _aiPattern = prefs.ai_pattern;
   } catch(e) { prefs = {}; }
 
   // Load presets
@@ -751,6 +752,8 @@ function applyAiPattern() {
   if (!data.pattern) { toast('لم يُعثر على نمط متسق في JSON'); return; }
   try { new RegExp(data.pattern); } catch { toast('✗ التعبير النمطي (regex) غير صالح'); return; }
   _aiPattern = data;
+  prefs.ai_pattern = data;
+  fetch(`${API}/api/prefs`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ai_pattern: data})});
   const preview = document.getElementById('ai-pattern-preview');
   document.getElementById('ai-pattern-preview-desc').textContent =
     `✓ ${data.description || data.pattern}`;
@@ -759,26 +762,41 @@ function applyAiPattern() {
       `<span style="color:var(--accent)">${escHtml(String(e.filename))}</span> ← رقم ${e.number}`
     ).join('<br>');
   if (preview) preview.style.display = 'block';
-  toast('✓ تم تطبيق النمط المخصص');
+  toast('✓ تم تطبيق النمط المخصص وحفظه');
 }
 
 function clearAiPattern() {
   _aiPattern = null;
+  delete prefs.ai_pattern;
+  fetch(`${API}/api/prefs`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ai_pattern: null})});
   const preview = document.getElementById('ai-pattern-preview');
   const input = document.getElementById('ai-pattern-input');
   if (preview) preview.style.display = 'none';
   if (input) input.value = '';
-  toast('تم إلغاء النمط المخصص');
+  toast('تم إلغاء النمط المخصص وحذفه');
 }
 
 // ── Operation selector ────────────────────────────────────────────────────────
 function selectOp(op) {
-  _aiPattern = null;
   currentOp = op;
   document.querySelectorAll('.op-btn').forEach(b => b.classList.remove('active'));
   const btn = document.querySelector(`[data-op="${op}"]`);
   if (btn) btn.classList.add('active');
   renderParams(op);
+  if (op === 'rename') _restoreAiPatternPreview();
+}
+
+function _restoreAiPatternPreview() {
+  if (!_aiPattern) return;
+  const preview = document.getElementById('ai-pattern-preview');
+  const desc    = document.getElementById('ai-pattern-preview-desc');
+  const samples = document.getElementById('ai-pattern-preview-samples');
+  if (!preview) return;
+  desc.textContent = `✓ ${_aiPattern.description || _aiPattern.pattern}`;
+  samples.innerHTML = (_aiPattern.examples || []).map(e =>
+    `<span style="color:var(--accent)">${escHtml(String(e.filename))}</span> ← رقم ${e.number}`
+  ).join('<br>');
+  preview.style.display = 'block';
 }
 
 // ── Params renderer ───────────────────────────────────────────────────────────
