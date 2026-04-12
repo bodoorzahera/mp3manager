@@ -677,9 +677,16 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
     base_time = _time.time()
     STEP = 60
 
+    seq_vals = [s for s, _, _ in with_seq]
+    has_dup_seqs = len(seq_vals) != len(set(seq_vals))
+    if has_dup_seqs:
+        dup_nums = sorted({s for s in seq_vals if seq_vals.count(s) > 1})
+        info(f"⚠ Duplicate sequences {dup_nums} — renumbering by position (1, 2, 3…)")
+
     renames = []
     for rank, (seq, body, f) in enumerate(with_seq):
-        renames.append((f, f"{seq:03d}_{clean_body(body)}{f.suffix.lower()}",
+        effective_seq = rank + 1 if has_dup_seqs else seq
+        renames.append((f, f"{effective_seq:03d}_{clean_body(body)}{f.suffix.lower()}",
                         base_time - rank * STEP))
     for body, f in no_seq:
         renames.append((f, f"{clean_body(body)}{f.suffix.lower()}", get_mtime(f)))
@@ -889,6 +896,37 @@ def _pipeline_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, r
         sr.elapsed_sec = time.time() - t0
 
     _print_report(reports)
+
+
+# ── AI Prompt generator ────────────────────────────────────────────────────────
+
+@app.get("/api/ai-prompt")
+async def ai_prompt(folder: str = "."):
+    p = Path(folder).expanduser().resolve()
+    if not p.exists() or not p.is_dir():
+        return JSONResponse({"error": "Folder not found"}, status_code=404)
+    from utils.file_utils import scan_mp3s
+    files = scan_mp3s(p)
+    names = [f.stem for f in files[:60]]
+    if not names:
+        return JSONResponse({"error": "No MP3 files found"}, status_code=404)
+    filelist = "\n".join(names)
+    prompt = (
+        "أنا أريد منك تحليل أسماء الملفات الصوتية هذه واستخراج النمط الذي يحدد رقم الحلقة أو التسلسل.\n\n"
+        "أعطني JSON فقط بهذا الشكل بدون أي شرح إضافي:\n"
+        "{\n"
+        '  "pattern": "تعبير Python regex فيه مجموعة التقاط واحدة (\\\\d+) لرقم التسلسل",\n'
+        '  "description": "وصف مختصر للنمط بالعربي",\n'
+        '  "examples": [\n'
+        '    {"filename": "اسم_الملف", "number": 1},\n'
+        '    {"filename": "اسم_الملف_2", "number": 2},\n'
+        '    {"filename": "اسم_الملف_3", "number": 3}\n'
+        "  ]\n"
+        "}\n\n"
+        "إذا لم يكن هناك نمط متسق، اجعل pattern: null\n\n"
+        f"قائمة الملفات:\n{filelist}"
+    )
+    return {"prompt": prompt, "count": len(names)}
 
 
 # ── Serve PWA ──────────────────────────────────────────────────────────────────

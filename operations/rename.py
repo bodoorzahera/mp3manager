@@ -101,12 +101,23 @@ def run_rename(folder: Path, prefs: dict, dry_run: bool = False, recursive: bool
     base_time = time.time()
     STEP = 60  # seconds per step
 
+    # ── Detect duplicate sequence numbers ─────────────────────────────────────
+    seq_vals = [s for s, _, _ in with_seq]
+    has_dup_seqs = len(seq_vals) != len(set(seq_vals))
+    if has_dup_seqs:
+        dup_nums = sorted({s for s in seq_vals if seq_vals.count(s) > 1})
+        warning(
+            f"Duplicate sequence numbers detected: {dup_nums} — "
+            "renumbering all files by position (1, 2, 3 …)"
+        )
+
     # ── Build rename plan ─────────────────────────────────────────────────────
     # entry: (old_path, new_name, new_mtime)
     renames: list[tuple[Path, str, float]] = []
 
     for rank, (seq, body, f) in enumerate(with_seq):
-        new_name = f"{seq:03d}_{clean_body(body)}{f.suffix.lower()}"
+        effective_seq = rank + 1 if has_dup_seqs else seq
+        new_name = f"{effective_seq:03d}_{clean_body(body)}{f.suffix.lower()}"
         new_mtime = base_time - rank * STEP   # 001 = newest, higher = older
         renames.append((f, new_name, new_mtime))
 
