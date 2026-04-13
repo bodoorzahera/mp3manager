@@ -1109,7 +1109,7 @@ function getParams() {
 }
 
 // ── Run ───────────────────────────────────────────────────────────────────────
-async function runOperation(seqOverrides) {
+async function runOperation(skipAnalyze) {
   if (isRunning) return;
   const folder = document.getElementById('folder-input').value.trim();
   if (!folder) { toast('حدد مجلد أولاً'); return; }
@@ -1117,12 +1117,9 @@ async function runOperation(seqOverrides) {
   const params = getParams();
   params.recursive  = document.getElementById('recursive').checked;
   params.make_copy  = document.getElementById('make-copy').checked;
-  if (seqOverrides && Object.keys(seqOverrides).length > 0) {
-    params.seq_overrides = seqOverrides;
-  }
 
   // For rename: analyze first and show correction modal if problems found
-  if (currentOp === 'rename' && !seqOverrides) {
+  if (currentOp === 'rename' && !skipAnalyze) {
     try {
       const ar = await fetch(`${API}/api/rename/analyze`, {
         method: 'POST',
@@ -1202,18 +1199,18 @@ function showRenameAnalyzeModal(ad) {
       </button>
 
       <div style="font-size:13px;color:var(--text);margin-bottom:6px">
-        الخطوة 2: الصق JSON الناتج هنا (مصفوفة [{file, number}...])
+        الخطوة 2: الصق JSON الناتج من الذكاء الاصطناعي هنا
       </div>
-      <textarea id="rename-overrides-input"
-        placeholder='[{"file": "اسم_الملف", "number": 1}, {"file": "اسم_الملف_2", "number": 2}]'
+      <textarea id="rename-pattern-input"
+        placeholder='{"pattern": "regex هنا", "description": "وصف", "examples": [...]}'
         style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--text);font-size:11px;font-family:monospace;resize:vertical;min-height:90px;direction:ltr;box-sizing:border-box"></textarea>
 
       <div style="display:flex;gap:8px;margin-top:12px">
-        <button onclick="applyRenameOverrides()" style="flex:1;padding:10px;background:var(--accent);border:none;border-radius:8px;color:#fff;cursor:pointer;font-size:13px;font-weight:bold">
-          ✓ تطبيق وتشغيل
+        <button onclick="applyAnalysisPattern()" style="flex:1;padding:10px;background:var(--accent);border:none;border-radius:8px;color:#fff;cursor:pointer;font-size:13px;font-weight:bold">
+          ✓ حفظ النمط وتشغيل
         </button>
-        <button onclick="runWithoutOverrides()" style="flex:1;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer;font-size:13px">
-          تشغيل بدون تصحيح
+        <button onclick="document.getElementById('rename-analyze-modal').remove(); runOperation(true)" style="flex:1;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer;font-size:13px">
+          تشغيل بدون نمط
         </button>
         <button onclick="document.getElementById('rename-analyze-modal').remove()" style="padding:10px 14px;background:none;border:1px solid var(--border);border-radius:8px;color:var(--muted);cursor:pointer;font-size:13px">
           إلغاء
@@ -1233,7 +1230,6 @@ function copyRenameAnalysisPrompt() {
   navigator.clipboard.writeText(text).then(
     () => toast('✓ تم نسخ الـ Prompt'),
     () => {
-      // Fallback: show text area to copy manually
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.style.cssText = 'position:fixed;left:-9999px';
@@ -1246,36 +1242,38 @@ function copyRenameAnalysisPrompt() {
   );
 }
 
-function applyRenameOverrides() {
-  const raw = document.getElementById('rename-overrides-input')?.value.trim();
-  if (!raw) { runWithoutOverrides(); return; }
+async function applyAnalysisPattern() {
+  const raw = document.getElementById('rename-pattern-input')?.value.trim();
+  if (!raw) { document.getElementById('rename-analyze-modal')?.remove(); runOperation(true); return; }
 
   let data;
   try {
-    const match = raw.match(/\[[\s\S]*\]/);
+    const match = raw.match(/\{[\s\S]*\}/);
     data = JSON.parse(match ? match[0] : raw);
   } catch {
-    toast('✗ JSON غير صالح');
+    toast('✗ JSON غير صالح — تحقق من الصياغة');
     return;
   }
 
-  if (!Array.isArray(data)) { toast('✗ يجب أن يكون JSON مصفوفة [...]'); return; }
+  if (!data.pattern) { toast('لم يُعثر على pattern في JSON'); return; }
 
-  const overrides = {};
-  for (const item of data) {
-    if (item.file && item.number != null) {
-      overrides[String(item.file)] = parseInt(item.number, 10);
-    }
-  }
+  try { new RegExp(data.pattern); } catch { toast('✗ regex غير صالح'); return; }
 
+  // Save pattern to prefs and update global
+  _aiPattern = data;
+  const prefs = { ai_pattern: data };
+  await fetch(`${API}/api/prefs`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(prefs),
+  }).catch(() => {});
+
+  // Update the AI pattern preview panel if visible
+  _restoreAiPatternPreview();
+
+  toast(`✓ تم حفظ النمط: ${data.description || data.pattern}`);
   document.getElementById('rename-analyze-modal')?.remove();
-  runOperation(overrides);
-}
-
-function runWithoutOverrides() {
-  document.getElementById('rename-analyze-modal')?.remove();
-  // Pass empty object to signal "skip analyze"
-  runOperation({});
+  runOperation(true);  // skip re-analyze, pattern is now saved
 }
 
 async function cancelRun() {

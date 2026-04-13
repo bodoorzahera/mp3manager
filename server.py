@@ -664,11 +664,7 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
         error(f"No MP3 files  |  {scan_summary(folder)}"); return
 
     number_action = params.get("number_action", prefs.get("number_action", "3"))
-    ai_pattern = params.get("ai_pattern")  # custom pattern from external AI, or None
-    # seq_overrides: {stem: number} — highest priority, from user-corrected AI JSON
-    seq_overrides: dict[str, int] = {
-        str(k): int(v) for k, v in (params.get("seq_overrides") or {}).items()
-    }
+    ai_pattern = params.get("ai_pattern")  # custom regex pattern from external AI, or None
 
     def clean_body(raw: str) -> str:
         b = clean_stem(raw)
@@ -677,16 +673,11 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
 
     with_seq, no_seq = [], []
     for f in files:
-        # Priority: seq_overrides > ai_pattern > built-in
-        if f.stem in seq_overrides:
-            seq = seq_overrides[f.stem]
-            _, body = extract_sequence_info(f.stem)
-        else:
-            seq, body = extract_sequence_info(f.stem)
-            if ai_pattern:
-                ai_seq, ai_body = extract_with_pattern(f.stem, ai_pattern)
-                if ai_seq is not None:
-                    seq, body = ai_seq, ai_body
+        seq, body = extract_sequence_info(f.stem)
+        if ai_pattern:
+            ai_seq, ai_body = extract_with_pattern(f.stem, ai_pattern)
+            if ai_seq is not None:
+                seq, body = ai_seq, ai_body
         if seq is not None:
             with_seq.append((seq, body, f))
         else:
@@ -993,13 +984,19 @@ async def rename_analyze(request: Request):
     if has_problems:
         filelist = "\n".join(problem_stems)
         prompt = (
-            "هذه أسماء ملفات صوتية لم يستطع البرنامج تحديد رقم الحلقة/التسلسل فيها أو وُجد تعارض في الأرقام.\n\n"
-            "أعطني JSON فقط بهذا الشكل بدون أي شرح — مصفوفة بترتيب صحيح:\n"
-            "[\n"
-            '  {"file": "اسم_الملف_بدون_امتداد", "number": 1},\n'
-            '  {"file": "اسم_الملف_2", "number": 2}\n'
-            "]\n\n"
-            "الأرقام يجب أن تكون متسلسلة ولا تتكرر.\n\n"
+            "أنا أريد منك تحليل أسماء الملفات الصوتية هذه واستخراج النمط الذي يحدد رقم الحلقة أو التسلسل.\n"
+            "هذه الملفات لم يستطع البرنامج تحديد رقم تسلسلها أو وُجد تعارض في أرقامها.\n\n"
+            "أعطني JSON فقط بهذا الشكل بدون أي شرح إضافي:\n"
+            "{\n"
+            '  "pattern": "تعبير Python regex فيه مجموعة التقاط واحدة (\\\\d+) لرقم التسلسل",\n'
+            '  "description": "وصف مختصر للنمط بالعربي",\n'
+            '  "examples": [\n'
+            '    {"filename": "اسم_الملف", "number": 1},\n'
+            '    {"filename": "اسم_الملف_2", "number": 2},\n'
+            '    {"filename": "اسم_الملف_3", "number": 3}\n'
+            "  ]\n"
+            "}\n\n"
+            "إذا لم يكن هناك نمط متسق، اجعل pattern: null\n\n"
             f"قائمة الملفات المشكلة:\n{filelist}"
         )
 
