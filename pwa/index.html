@@ -1109,17 +1109,40 @@ function getParams() {
 }
 
 // ── Run ───────────────────────────────────────────────────────────────────────
-async function runOperation() {
+async function runOperation(seqOverrides) {
   if (isRunning) return;
   const folder = document.getElementById('folder-input').value.trim();
   if (!folder) { toast('حدد مجلد أولاً'); return; }
 
-  clearLog();
-  setRunning(true);
-
   const params = getParams();
   params.recursive  = document.getElementById('recursive').checked;
   params.make_copy  = document.getElementById('make-copy').checked;
+  if (seqOverrides && Object.keys(seqOverrides).length > 0) {
+    params.seq_overrides = seqOverrides;
+  }
+
+  // For rename: analyze first and show correction modal if problems found
+  if (currentOp === 'rename' && !seqOverrides) {
+    try {
+      const ar = await fetch(`${API}/api/rename/analyze`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ folder, params, recursive: params.recursive }),
+      });
+      const ad = await ar.json();
+      if (ad.error) { toast(ad.error); return; }
+      if (ad.has_problems) {
+        showRenameAnalyzeModal(ad);
+        return;
+      }
+    } catch(e) {
+      // Network error during analyze — proceed anyway
+    }
+  }
+
+  clearLog();
+  setRunning(true);
+
   const payload = {
     operation: currentOp,
     folder:    folder,
@@ -1141,6 +1164,118 @@ async function runOperation() {
     appendLog(`✗ تعذر الاتصال: ${e.message}`, 'err');
     setRunning(false);
   }
+}
+
+function showRenameAnalyzeModal(ad) {
+  document.getElementById('rename-analyze-modal')?.remove();
+
+  const noSeqCount = ad.no_seq_count || 0;
+  const dupSeqCount = ad.dup_seq_count || 0;
+  const problemStems = ad.problem_stems || [];
+
+  let problemHtml = '';
+  if (problemStems.length) {
+    problemHtml = problemStems.map(s => `<div style="font-size:11px;color:var(--muted);padding:2px 0;word-break:break-all">${escHtml(s)}</div>`).join('');
+  }
+
+  let warningLines = [];
+  if (noSeqCount > 0) warningLines.push(`${noSeqCount} ملف لم يُعثر على رقم تسلسل فيه`);
+  if (dupSeqCount > 0) warningLines.push(`${dupSeqCount} ملف بأرقام تسلسل متكررة`);
+
+  const modal = document.createElement('div');
+  modal.id = 'rename-analyze-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  modal.innerHTML = `
+    <div style="background:var(--card);border-radius:12px;padding:20px;max-width:560px;width:100%;max-height:90vh;overflow-y:auto;direction:rtl">
+      <div style="font-size:16px;font-weight:bold;margin-bottom:8px;color:var(--yellow)">⚠ مشاكل في أسماء الملفات</div>
+      <div style="font-size:13px;color:var(--text);margin-bottom:12px">${warningLines.map(l=>`<div>• ${l}</div>`).join('')}</div>
+
+      <div style="max-height:160px;overflow-y:auto;background:var(--surface);border-radius:8px;padding:8px;margin-bottom:12px">
+        ${problemHtml || '<div style="font-size:11px;color:var(--muted)">لا توجد ملفات مشكلة</div>'}
+      </div>
+
+      <div style="font-size:13px;color:var(--text);margin-bottom:6px">
+        الخطوة 1: انسخ الـ Prompt وأرسله لأي AI (ChatGPT، Claude.ai...)
+      </div>
+      <button onclick="copyRenameAnalysisPrompt()" style="width:100%;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer;margin-bottom:12px;font-size:13px">
+        📋 نسخ الـ Prompt للذكاء الاصطناعي
+      </button>
+
+      <div style="font-size:13px;color:var(--text);margin-bottom:6px">
+        الخطوة 2: الصق JSON الناتج هنا (مصفوفة [{file, number}...])
+      </div>
+      <textarea id="rename-overrides-input"
+        placeholder='[{"file": "اسم_الملف", "number": 1}, {"file": "اسم_الملف_2", "number": 2}]'
+        style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--text);font-size:11px;font-family:monospace;resize:vertical;min-height:90px;direction:ltr;box-sizing:border-box"></textarea>
+
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button onclick="applyRenameOverrides()" style="flex:1;padding:10px;background:var(--accent);border:none;border-radius:8px;color:#fff;cursor:pointer;font-size:13px;font-weight:bold">
+          ✓ تطبيق وتشغيل
+        </button>
+        <button onclick="runWithoutOverrides()" style="flex:1;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer;font-size:13px">
+          تشغيل بدون تصحيح
+        </button>
+        <button onclick="document.getElementById('rename-analyze-modal').remove()" style="padding:10px 14px;background:none;border:1px solid var(--border);border-radius:8px;color:var(--muted);cursor:pointer;font-size:13px">
+          إلغاء
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  // Store the prompt for copy
+  modal._prompt = ad.prompt;
+}
+
+function copyRenameAnalysisPrompt() {
+  const modal = document.getElementById('rename-analyze-modal');
+  const text = modal?._prompt || '';
+  if (!text) { toast('لا يوجد prompt'); return; }
+  navigator.clipboard.writeText(text).then(
+    () => toast('✓ تم نسخ الـ Prompt'),
+    () => {
+      // Fallback: show text area to copy manually
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      toast('✓ تم نسخ الـ Prompt');
+    }
+  );
+}
+
+function applyRenameOverrides() {
+  const raw = document.getElementById('rename-overrides-input')?.value.trim();
+  if (!raw) { runWithoutOverrides(); return; }
+
+  let data;
+  try {
+    const match = raw.match(/\[[\s\S]*\]/);
+    data = JSON.parse(match ? match[0] : raw);
+  } catch {
+    toast('✗ JSON غير صالح');
+    return;
+  }
+
+  if (!Array.isArray(data)) { toast('✗ يجب أن يكون JSON مصفوفة [...]'); return; }
+
+  const overrides = {};
+  for (const item of data) {
+    if (item.file && item.number != null) {
+      overrides[String(item.file)] = parseInt(item.number, 10);
+    }
+  }
+
+  document.getElementById('rename-analyze-modal')?.remove();
+  runOperation(overrides);
+}
+
+function runWithoutOverrides() {
+  document.getElementById('rename-analyze-modal')?.remove();
+  // Pass empty object to signal "skip analyze"
+  runOperation({});
 }
 
 async function cancelRun() {

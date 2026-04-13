@@ -650,12 +650,25 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
     )
     import time as _time
 
-    files = scan_mp3s(folder, recursive=recursive)
+    # Recursive mode: process each subfolder independently (own numbering per folder)
+    if recursive:
+        dirs = sorted(d for d in folder.rglob("*") if d.is_dir() and not d.name.startswith("."))
+        for d in [folder] + dirs:
+            if scan_mp3s(d, recursive=False):
+                info(f"── {d.name}")
+                _rename_headless(d, params, prefs, dry_run, recursive=False)
+        return
+
+    files = scan_mp3s(folder, recursive=False)
     if not files:
         error(f"No MP3 files  |  {scan_summary(folder)}"); return
 
     number_action = params.get("number_action", prefs.get("number_action", "3"))
     ai_pattern = params.get("ai_pattern")  # custom pattern from external AI, or None
+    # seq_overrides: {stem: number} — highest priority, from user-corrected AI JSON
+    seq_overrides: dict[str, int] = {
+        str(k): int(v) for k, v in (params.get("seq_overrides") or {}).items()
+    }
 
     def clean_body(raw: str) -> str:
         b = clean_stem(raw)
@@ -664,11 +677,16 @@ def _rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, rec
 
     with_seq, no_seq = [], []
     for f in files:
-        seq, body = extract_sequence_info(f.stem)
-        if ai_pattern:
-            ai_seq, ai_body = extract_with_pattern(f.stem, ai_pattern)
-            if ai_seq is not None:
-                seq, body = ai_seq, ai_body
+        # Priority: seq_overrides > ai_pattern > built-in
+        if f.stem in seq_overrides:
+            seq = seq_overrides[f.stem]
+            _, body = extract_sequence_info(f.stem)
+        else:
+            seq, body = extract_sequence_info(f.stem)
+            if ai_pattern:
+                ai_seq, ai_body = extract_with_pattern(f.stem, ai_pattern)
+                if ai_seq is not None:
+                    seq, body = ai_seq, ai_body
         if seq is not None:
             with_seq.append((seq, body, f))
         else:
@@ -897,6 +915,105 @@ def _pipeline_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, r
         sr.elapsed_sec = time.time() - t0
 
     _print_report(reports)
+
+
+# ── Rename analyze ─────────────────────────────────────────────────────────────
+
+@app.post("/api/rename/analyze")
+async def rename_analyze(request: Request):
+    """Scan folder(s) and identify files with missing/duplicate sequence numbers."""
+    body = await request.json()
+    folder_str = body.get("folder", ".")
+    params = body.get("params", {})
+    recursive = body.get("recursive", False)
+
+    p = Path(folder_str).expanduser().resolve()
+    if not p.exists() or not p.is_dir():
+        return JSONResponse({"error": "Folder not found"}, status_code=404)
+
+    from utils.file_utils import scan_mp3s, extract_sequence_info, extract_with_pattern
+
+    ai_pattern = params.get("ai_pattern")
+
+    def _analyze_folder(folder: Path) -> dict:
+        files = scan_mp3s(folder, recursive=False)
+        if not files:
+            return None
+
+        no_seq_stems = []
+        seq_map: dict[int, list[str]] = {}   # seq → [stems]
+
+        for f in files:
+            seq, body = extract_sequence_info(f.stem)
+            if ai_pattern:
+                ai_seq, ai_body = extract_with_pattern(f.stem, ai_pattern)
+                if ai_seq is not None:
+                    seq = ai_seq
+            if seq is None:
+                no_seq_stems.append(f.stem)
+            else:
+                seq_map.setdefault(seq, []).append(f.stem)
+
+        dup_seq_stems = []
+        for seq_num, stems in seq_map.items():
+            if len(stems) > 1:
+                dup_seq_stems.extend(stems)
+
+        return {
+            "folder": str(folder),
+            "folder_name": folder.name,
+            "no_seq": no_seq_stems,
+            "dup_seq": dup_seq_stems,
+            "ok_count": len(files) - len(no_seq_stems) - len(dup_seq_stems),
+            "total": len(files),
+        }
+
+    if recursive:
+        dirs = sorted(d for d in p.rglob("*") if d.is_dir() and not d.name.startswith("."))
+        folders_to_check = [p] + dirs
+    else:
+        folders_to_check = [p]
+
+    folder_results = []
+    for folder in folders_to_check:
+        result = _analyze_folder(folder)
+        if result:
+            folder_results.append(result)
+
+    # Collect all problem stems across all folders for the AI prompt
+    all_no_seq = [stem for r in folder_results for stem in r["no_seq"]]
+    all_dup_seq = [stem for r in folder_results for stem in r["dup_seq"]]
+    problem_stems = list(dict.fromkeys(all_no_seq + all_dup_seq))[:60]
+
+    has_problems = bool(problem_stems)
+    total_files = sum(r["total"] for r in folder_results)
+    ok_count = sum(r["ok_count"] for r in folder_results)
+
+    prompt = ""
+    if has_problems:
+        filelist = "\n".join(problem_stems)
+        prompt = (
+            "هذه أسماء ملفات صوتية لم يستطع البرنامج تحديد رقم الحلقة/التسلسل فيها أو وُجد تعارض في الأرقام.\n\n"
+            "أعطني JSON فقط بهذا الشكل بدون أي شرح — مصفوفة بترتيب صحيح:\n"
+            "[\n"
+            '  {"file": "اسم_الملف_بدون_امتداد", "number": 1},\n'
+            '  {"file": "اسم_الملف_2", "number": 2}\n'
+            "]\n\n"
+            "الأرقام يجب أن تكون متسلسلة ولا تتكرر.\n\n"
+            f"قائمة الملفات المشكلة:\n{filelist}"
+        )
+
+    return {
+        "has_problems": has_problems,
+        "folders": folder_results,
+        "total_files": total_files,
+        "ok_count": ok_count,
+        "problem_count": len(all_no_seq) + len(all_dup_seq),
+        "no_seq_count": len(all_no_seq),
+        "dup_seq_count": len(all_dup_seq),
+        "problem_stems": problem_stems,
+        "prompt": prompt,
+    }
 
 
 # ── AI Prompt generator ────────────────────────────────────────────────────────

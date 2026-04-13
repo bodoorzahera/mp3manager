@@ -31,7 +31,16 @@ from utils.file_utils import (
 def run_rename(folder: Path, prefs: dict, dry_run: bool = False, recursive: bool = False, **_) -> None:
     header("Rename & Arrange")
 
-    files = scan_mp3s(folder, recursive=recursive)
+    # Recursive mode: process each subfolder independently (own numbering per folder)
+    if recursive:
+        dirs = sorted(d for d in folder.rglob("*") if d.is_dir() and not d.name.startswith("."))
+        for d in [folder] + dirs:
+            if scan_mp3s(d, recursive=False):
+                console.rule(f"[bold]{d.name}[/]")
+                run_rename(d, prefs, dry_run=dry_run, recursive=False)
+        return
+
+    files = scan_mp3s(folder, recursive=False)
     if not files:
         from utils.file_utils import scan_summary
         error(f"No MP3 files found in: {folder}")
