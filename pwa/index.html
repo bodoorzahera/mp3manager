@@ -281,7 +281,7 @@ select.param-input { cursor: pointer; }
           <label for="make-copy">إنشاء نسخة أولاً (موصى به)</label>
         </div>
         <div class="dry-row">
-          <input type="checkbox" id="recursive" />
+          <input type="checkbox" id="recursive" checked />
           <label for="recursive">تضمين المجلدات الفرعية (Recursive)</label>
         </div>
         <div class="dry-row">
@@ -1244,36 +1244,39 @@ function copyRenameAnalysisPrompt() {
 
 async function applyAnalysisPattern() {
   const raw = document.getElementById('rename-pattern-input')?.value.trim();
-  if (!raw) { document.getElementById('rename-analyze-modal')?.remove(); runOperation(true); return; }
+  if (!raw) {
+    document.getElementById('rename-analyze-modal')?.remove();
+    runOperation(true);
+    return;
+  }
 
   let data;
   try {
     const match = raw.match(/\{[\s\S]*\}/);
     data = JSON.parse(match ? match[0] : raw);
-  } catch {
+  } catch(e) {
     toast('✗ JSON غير صالح — تحقق من الصياغة');
     return;
   }
 
   if (!data.pattern) { toast('لم يُعثر على pattern في JSON'); return; }
 
-  try { new RegExp(data.pattern); } catch { toast('✗ regex غير صالح'); return; }
+  try { new RegExp(data.pattern); } catch(e) { toast('✗ regex غير صالح'); return; }
 
-  // Save pattern to prefs and update global
+  // Save pattern to global + prefs (fire-and-forget, don't block run)
   _aiPattern = data;
-  const prefs = { ai_pattern: data };
-  await fetch(`${API}/api/prefs`, {
+  fetch(`${API}/api/prefs`, {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(prefs),
+    body: JSON.stringify({ ai_pattern: data }),
   }).catch(() => {});
 
-  // Update the AI pattern preview panel if visible
-  _restoreAiPatternPreview();
+  // Update preview panel if visible (guarded)
+  try { _restoreAiPatternPreview(); } catch(e) {}
 
   toast(`✓ تم حفظ النمط: ${data.description || data.pattern}`);
   document.getElementById('rename-analyze-modal')?.remove();
-  runOperation(true);  // skip re-analyze, pattern is now saved
+  runOperation(true);
 }
 
 async function cancelRun() {
