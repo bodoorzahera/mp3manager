@@ -180,7 +180,7 @@ def run_split(folder: Path, prefs: dict, dry_run: bool = False, **_) -> None:
         t.add_row(
             entry["src"].name,
             format_duration(entry["duration"]),
-            str(entry["segments"] if not entry["is_standalone"] else len(entry["parts"])),
+            str(len(entry["parts"])),
             tag,
             label,
         )
