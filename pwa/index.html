@@ -421,7 +421,7 @@ select.param-input { cursor: pointer; }
 const API = window.location.origin;
 let currentOp = 'compress';
 let currentSection = 'audio';
-let currentFolder = localStorage.getItem('mp3_folder') || '';
+let currentFolder = localStorage.getItem('mp3_folder') || '/data/data/com.termux/files/home/storage/shared/input';
 let isRunning = false;
 let eventSource = null;
 let logLines = 0;
@@ -1083,13 +1083,21 @@ function renderParams(op) {
         ${chips('video_crf', [18,20,23,26,28], prefs.video_crf||23)}
       </div>
       <div class="param-section">
-        <span class="param-label">أقصى ارتفاع (اختياري)</span>
-        <select class="param-input" id="video_res">
-          <option value="" ${!prefs.video_res||prefs.video_res===''?'selected':''}>بدون تغيير</option>
-          <option value="480" ${prefs.video_res==='480'?'selected':''}>480p</option>
-          <option value="720" ${(prefs.video_res||'720')==='720'?'selected':''}>720p</option>
-          <option value="1080" ${prefs.video_res==='1080'?'selected':''}>1080p</option>
-        </select>
+        <span class="param-label">أقصى ارتفاع بالبكسل</span>
+        <div class="param-row">
+          ${['','360','480','720','1080'].map(v=>`
+          <div class="param-chip ${(prefs.video_res||'720')===v?'selected':''}"
+            onclick="selectChip(this,'video_res','${v}')">${v||'original'}</div>`).join('')}
+        </div>
+        <input class="param-input" id="video_res"
+          value="${prefs.video_res||'720'}"
+          placeholder="أو اكتب أي رقم: 240, 360, 480, 720, 1080, 1440..."
+          style="margin-top:4px"
+          oninput="unselectChips('video_res')">
+      </div>
+      <div class="param-section">
+        <span class="param-label">السرعة (مع الضغط)</span>
+        ${chips('video_speed', [0.5,0.75,1.0,1.25,1.5,2.0], prefs.video_default_speed||1.0, v=>v+'×')}
       </div>`,
 
     video_speed: `

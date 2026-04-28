@@ -517,6 +517,7 @@ def _dispatch(op: str, folder: Path, params: dict, prefs: dict, dry_run: bool) -
             folder,
             crf=int(params.get("video_crf", prefs.get("video_crf", 23))),
             res=str(params.get("video_res", prefs.get("video_res", ""))).strip(),
+            speed=float(params.get("video_speed", prefs.get("video_default_speed", 1.0))),
             dry_run=dry_run,
             recursive=recursive,
         )
@@ -1087,17 +1088,20 @@ def _video_rename_headless(folder: Path, params: dict, prefs: dict, dry_run: boo
             error(f"✗ [{i}/{total}] {old_f.name} — {exc}")
 
 
-def _video_compress_headless(folder: Path, crf: int, res: str, dry_run: bool, recursive: bool = False) -> None:
+def _video_compress_headless(folder: Path, crf: int, res: str, dry_run: bool,
+                             speed: float = 1.0, recursive: bool = False) -> None:
     from ui import info, success, error
-    from utils.ffmpeg_utils import run_ffmpeg
+    from utils.ffmpeg_utils import run_ffmpeg, build_atempo_filter
     from utils.file_utils import replace_if_smaller
 
     files = scan_videos(folder, recursive=recursive)
     if not files:
         error(f"No video files  |  {scan_summary(folder)}"); return
 
+    apply_speed = speed != 1.0
     total = len(files)
-    info(f"Video compress {total} file(s)  CRF={crf}" + (f"  max {res}p" if res else ""))
+    desc = f"CRF={crf}" + (f" max {res}p" if res else "") + (f" speed {speed}x" if apply_speed else "")
+    info(f"Video compress {total} file(s)  {desc}")
     if dry_run: success("Dry run done."); return
 
     done = err_n = 0
@@ -1106,8 +1110,25 @@ def _video_compress_headless(folder: Path, crf: int, res: str, dry_run: bool, re
         info(f"[{i}/{total}] {f.name}...")
         mtime = get_mtime(f)
         tmp = f.with_suffix(".tmp_vc" + f.suffix)
-        vf_args = ["-vf", f"scale=-2:{res}"] if res else []
-        args = ["-i", str(f)] + vf_args + ["-c:v", "libx264", "-crf", str(crf), "-c:a", "copy", "-movflags", "+faststart", str(tmp)]
+
+        vf_parts = []
+        if res:
+            vf_parts.append(f"scale=-2:{res}")
+        if apply_speed:
+            vf_parts.append(f"setpts={1/speed:.6f}*PTS")
+
+        args = ["-i", str(f)]
+        if vf_parts:
+            args += ["-vf", ",".join(vf_parts)]
+        args += ["-c:v", "libx264", "-crf", str(crf)]
+        if apply_speed:
+            vi = get_video_info(f)
+            if vi.get("has_audio"):
+                args += ["-af", build_atempo_filter(speed)]
+        else:
+            args += ["-c:a", "copy"]
+        args += ["-movflags", "+faststart", str(tmp)]
+
         ok, err_msg = run_ffmpeg(args)
         if ok:
             replace_if_smaller(f, tmp, mtime)

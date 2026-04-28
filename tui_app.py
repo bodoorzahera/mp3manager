@@ -417,7 +417,7 @@ class MP3ManagerTUI(App):
 
     def __init__(self, folder: Path | None = None) -> None:
         super().__init__()
-        self.folder     = folder or Path.cwd()
+        self.folder     = folder or Path("/data/data/com.termux/files/home/storage/shared/input")
         self.prefs      = load_prefs()
         self.dry_run    = self.prefs.get("dry_run_default", True)
         self.copy_mode  = False
