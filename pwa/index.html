@@ -159,6 +159,15 @@ select.param-input { cursor: pointer; }
 .log-toggle { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 14px; padding: 2px 6px; transition: transform .2s; }
 #log-panel.collapsed .log-toggle { transform: rotate(180deg); }
 
+/* ── Section tabs (Audio / Video) ── */
+#section-tabs { display: flex; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.sec-tab { flex: 1; padding: 8px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; border-bottom: 2px solid transparent; transition: all .2s; font-family: var(--font); }
+.sec-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.sec-tab:hover:not(.active) { color: var(--text); background: var(--glass); }
+
+/* ── Video sidebar divider ── */
+.op-section-label { padding: 8px 14px 2px; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; border-top: 1px solid var(--border); margin-top: 4px; }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -232,6 +241,12 @@ select.param-input { cursor: pointer; }
   <datalist id="folder-history"></datalist>
   <button onclick="openBrowse()" style="background:var(--card);color:var(--text);border:1px solid var(--border)">🗂 Browse</button>
   <button onclick="loadFolder()">📂 فتح</button>
+</div>
+
+<!-- Section tabs -->
+<div id="section-tabs">
+  <button class="sec-tab active" id="tab-audio" onclick="switchSection('audio')">🎵 Audio</button>
+  <button class="sec-tab" id="tab-video" onclick="switchSection('video')">📹 Video</button>
 </div>
 
 <!-- Folder info -->
@@ -350,6 +365,34 @@ select.param-input { cursor: pointer; }
     <button class="op-btn" data-op="batch_folders" onclick="selectOp('batch_folders')">
       <span class="op-icon">📂⚡</span><span class="op-label">Batch by Name</span>
     </button>
+    <!-- Video operations (hidden by default) -->
+    <div id="video-ops" style="display:none">
+      <div class="op-section-label">📹 فيديو</div>
+      <button class="op-btn" data-op="video_rename" onclick="selectOp('video_rename')">
+        <span class="op-icon">✏️</span><span class="op-label">Rename & Arrange</span>
+      </button>
+      <button class="op-btn" data-op="video_compress" onclick="selectOp('video_compress')">
+        <span class="op-icon">📦</span><span class="op-label">Compress</span>
+      </button>
+      <button class="op-btn" data-op="video_speed" onclick="selectOp('video_speed')">
+        <span class="op-icon">⏩</span><span class="op-label">Speed</span>
+      </button>
+      <button class="op-btn" data-op="video_trim" onclick="selectOp('video_trim')">
+        <span class="op-icon">✂️</span><span class="op-label">Trim / Cut</span>
+      </button>
+      <button class="op-btn" data-op="video_convert" onclick="selectOp('video_convert')">
+        <span class="op-icon">🔄</span><span class="op-label">Convert Format</span>
+      </button>
+      <button class="op-btn" data-op="video_merge" onclick="selectOp('video_merge')">
+        <span class="op-icon">🔗</span><span class="op-label">Merge</span>
+      </button>
+      <button class="op-btn" data-op="video_extract" onclick="selectOp('video_extract')">
+        <span class="op-icon">🎵</span><span class="op-label">Extract Audio</span>
+      </button>
+      <button class="op-btn" data-op="video_csv" onclick="selectOp('video_csv')">
+        <span class="op-icon">📊</span><span class="op-label">Export CSV</span>
+      </button>
+    </div>
   </div>
 </div>
 
@@ -377,6 +420,7 @@ select.param-input { cursor: pointer; }
 // ── Config ────────────────────────────────────────────────────────────────────
 const API = window.location.origin;
 let currentOp = 'compress';
+let currentSection = 'audio';
 let currentFolder = localStorage.getItem('mp3_folder') || '';
 let isRunning = false;
 let eventSource = null;
@@ -452,12 +496,13 @@ async function loadFolder() {
 
     const pills = [
       `<span class="info-pill"><strong>${d.mp3_count}</strong> MP3</span>`,
+      d.video_count > 0 ? `<span class="info-pill" style="color:var(--accent2)"><strong>${d.video_count}</strong> 📹 فيديو</span>` : '',
       `<span class="info-pill"><strong>${d.other_media_count}</strong> ملفات أخرى</span>`,
       `<span class="info-pill"><strong>${d.subfolder_count}</strong> مجلد</span>`,
-    ];
+    ].filter(Boolean);
     if (!d.ffmpeg_ok)
       pills.push('<span class="warn-pill">⚠ ffmpeg غير موجود</span>');
-    if (d.mp3_count === 0 && d.other_media_count === 0)
+    if (d.mp3_count === 0 && d.video_count === 0 && d.other_media_count === 0)
       pills.push(`<span class="warn-pill">⚠ لا توجد ملفات — ${d.summary}</span>`);
 
     document.getElementById('folder-info').innerHTML = pills.join('');
@@ -466,7 +511,7 @@ async function loadFolder() {
     addToHistory(path);
 
     // File list
-    renderFileList(d.mp3_files, d.other_files, d.subfolders);
+    renderFileList(d.mp3_files, d.video_files || [], d.other_files, d.subfolders);
   } catch(e) {
     document.getElementById('folder-info').innerHTML =
       `<span class="warn-pill">⚠ لا يمكن الاتصال بالسيرفر: ${e.message}</span>`;
@@ -650,11 +695,11 @@ function safeId(str) {
   return 'fs_' + Math.abs(h).toString(36);
 }
 
-function renderFileList(mp3s, others, dirs) {
+function renderFileList(mp3s, videos, others, dirs) {
   const el = document.getElementById('file-list');
   let html = '';
 
-  if (dirs.length) {
+  if (dirs && dirs.length) {
     html += '<h3>📁 مجلدات فرعية</h3>';
     dirs.forEach(d => {
       html += `<div class="file-item">
@@ -664,7 +709,7 @@ function renderFileList(mp3s, others, dirs) {
     });
   }
 
-  if (mp3s.length) {
+  if (mp3s && mp3s.length) {
     html += '<h3>🎵 ملفات MP3</h3>';
     mp3s.forEach(f => {
       html += `<div class="file-item">
@@ -674,7 +719,19 @@ function renderFileList(mp3s, others, dirs) {
     });
   }
 
-  if (others.length) {
+  if (videos && videos.length) {
+    html += '<h3>📹 ملفات فيديو</h3>';
+    videos.forEach(f => {
+      const res = f.resolution ? `<span style="color:var(--accent2)">${escHtml(f.resolution)}</span> · ` : '';
+      const fps = f.fps ? `${f.fps}fps · ` : '';
+      html += `<div class="file-item">
+        <div class="file-status" id="${safeId(f.name)}"></div>
+        <span class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</span>
+        <span class="file-meta">${res}${fps}${escHtml(f.duration||'')} ${escHtml(f.size_human)}</span></div>`;
+    });
+  }
+
+  if (others && others.length) {
     html += '<h3>🎬 ملفات أخرى</h3>';
     others.forEach(f => {
       html += `<div class="file-item">
@@ -774,6 +831,26 @@ function clearAiPattern() {
   if (preview) preview.style.display = 'none';
   if (input) input.value = '';
   toast('تم إلغاء النمط المخصص وحذفه');
+}
+
+// ── Section switcher (Audio / Video) ─────────────────────────────────────────
+function switchSection(section) {
+  currentSection = section;
+  const audioOps = document.querySelectorAll('#sidebar > .op-btn, #sidebar > .op-pipeline');
+  const videoDiv  = document.getElementById('video-ops');
+  if (section === 'audio') {
+    audioOps.forEach(el => el.style.display = '');
+    videoDiv.style.display = 'none';
+    document.getElementById('tab-audio').classList.add('active');
+    document.getElementById('tab-video').classList.remove('active');
+    selectOp('compress');
+  } else {
+    audioOps.forEach(el => el.style.display = 'none');
+    videoDiv.style.display = '';
+    document.getElementById('tab-video').classList.add('active');
+    document.getElementById('tab-audio').classList.remove('active');
+    selectOp('video_compress');
+  }
 }
 
 // ── Operation selector ────────────────────────────────────────────────────────
@@ -986,6 +1063,99 @@ function renderParams(op) {
       </div>`,
 
     pipeline: renderPipelineParams(),
+
+    // ── Video templates ─────────────────────────────────────────────────────
+    video_rename: `
+      <div class="param-section">
+        <span class="param-label">أرقام داخل اسم الملف</span>
+        <div class="param-row">
+          ${['1','2','3'].map((v,i)=>`
+          <div class="param-chip ${(prefs.number_action||'3')===v?'selected':''}"
+            onclick="selectChip(this,'number_action','${v}')">
+            ${['حذف الكل','حذف التسلسلية','إبقاء الكل'][i]}</div>`).join('')}
+        </div>
+        <input type="hidden" id="number_action" value="${prefs.number_action||'3'}">
+      </div>`,
+
+    video_compress: `
+      <div class="param-section">
+        <span class="param-label">جودة CRF (18=أفضل جودة · 28=أصغر حجم)</span>
+        ${chips('video_crf', [18,20,23,26,28], prefs.video_crf||23)}
+      </div>
+      <div class="param-section">
+        <span class="param-label">أقصى ارتفاع (اختياري)</span>
+        <select class="param-input" id="video_res">
+          <option value="" ${!prefs.video_res||prefs.video_res===''?'selected':''}>بدون تغيير</option>
+          <option value="480" ${prefs.video_res==='480'?'selected':''}>480p</option>
+          <option value="720" ${(prefs.video_res||'720')==='720'?'selected':''}>720p</option>
+          <option value="1080" ${prefs.video_res==='1080'?'selected':''}>1080p</option>
+        </select>
+      </div>`,
+
+    video_speed: `
+      <div class="param-section">
+        <span class="param-label">السرعة (فيديو + صوت معاً)</span>
+        ${chips('video_speed', [0.5,0.75,1.0,1.25,1.5,2.0], prefs.video_default_speed||1.0, v=>v+'×')}
+      </div>`,
+
+    video_trim: `
+      <div class="param-section">
+        <span class="param-label">وقت البداية (مثال: 00:01:30 أو 90)</span>
+        <input class="param-input" id="trim_start" placeholder="00:00:00" value="0">
+      </div>
+      <div class="param-section">
+        <span class="param-label">وقت النهاية (فارغ = حتى النهاية)</span>
+        <input class="param-input" id="trim_end" placeholder="00:05:00" value="">
+      </div>
+      <p style="color:var(--muted);font-size:11px;margin-top:8px;line-height:1.5">
+        يستخدم stream copy (سريع، دقة على keyframe boundary).
+      </p>`,
+
+    video_convert: `
+      <div class="param-section">
+        <span class="param-label">الصيغة المستهدفة</span>
+        <select class="param-input" id="video_format">
+          <option value="mp4" ${(prefs.video_output_format||'mp4')==='mp4'?'selected':''}>MP4 (H.264)</option>
+          <option value="mkv" ${prefs.video_output_format==='mkv'?'selected':''}>MKV</option>
+          <option value="webm" ${prefs.video_output_format==='webm'?'selected':''}>WebM (VP9)</option>
+          <option value="avi" ${prefs.video_output_format==='avi'?'selected':''}>AVI</option>
+        </select>
+      </div>
+      <div class="param-section">
+        <span class="param-label">وضع التحويل</span>
+        <select class="param-input" id="copy_streams">
+          <option value="1" ${prefs.video_copy_streams!==false?'selected':''}>نسخ التدفقات (سريع)</option>
+          <option value="0" ${prefs.video_copy_streams===false?'selected':''}>إعادة ترميز (أبطأ، توافق أكبر)</option>
+        </select>
+      </div>`,
+
+    video_merge: `<div class="param-section">
+      <p style="color:var(--muted);font-size:12px;line-height:1.5">
+        دمج جميع ملفات الفيديو في المجلد بترتيبها.<br>
+        لو كانت نفس الصيغة: stream copy (سريع).<br>
+        لو صيغ مختلفة: re-encode إلى MP4.
+      </p></div>`,
+
+    video_extract: `
+      <div class="param-section">
+        <span class="param-label">صيغة الصوت الناتج</span>
+        <select class="param-input" id="audio_format">
+          <option value="mp3" ${(prefs.video_audio_format||'mp3')==='mp3'?'selected':''}>MP3</option>
+          <option value="aac" ${prefs.video_audio_format==='aac'?'selected':''}>AAC (M4A)</option>
+          <option value="wav" ${prefs.video_audio_format==='wav'?'selected':''}>WAV</option>
+        </select>
+      </div>
+      <div class="param-section">
+        <span class="param-label">معدل البت (kbps)</span>
+        ${chips('bitrate', BITRATES, prefs.default_bitrate||128, v=>v+'k')}
+      </div>`,
+
+    video_csv: `<div class="param-section">
+      <p style="color:var(--muted);font-size:12px;line-height:1.5">
+        تصدير قائمة بجميع ملفات الفيديو مع:<br>
+        الاسم • المدة • الدقة • FPS • الحجم<br>
+        مُحفوظة في VideoList.csv
+      </p></div>`,
   };
 
   el.innerHTML = templates[op] || `<p style="color:var(--muted)">لا توجد إعدادات</p>`;
@@ -1104,6 +1274,15 @@ function getParams() {
     },
     csv:    {},
     series: {},
+    // Video operations
+    video_rename:   { number_action: g('number_action') || prefs.number_action || '3' },
+    video_compress: { video_crf: gn('video_crf') || prefs.video_crf || 23, video_res: g('video_res') || '' },
+    video_speed:    { video_speed: gn('video_speed') || prefs.video_default_speed || 1.0 },
+    video_trim:     { trim_start: g('trim_start') || '0', trim_end: g('trim_end') || '' },
+    video_convert:  { video_format: g('video_format') || prefs.video_output_format || 'mp4', copy_streams: g('copy_streams') !== '0' },
+    video_merge:    {},
+    video_extract:  { audio_format: g('audio_format') || prefs.video_audio_format || 'mp3', bitrate: gn('bitrate') || prefs.default_bitrate || 128 },
+    video_csv:      {},
   };
   return map[currentOp] || {};
 }

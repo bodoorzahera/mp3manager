@@ -18,6 +18,79 @@ def check_ffmpeg() -> bool:
 
 # ── Probe ──────────────────────────────────────────────────────────────────────
 
+def get_video_info(filepath: Path) -> dict:
+    """
+    Return dict:
+        duration_sec  : float
+        has_video     : bool
+        width         : int
+        height        : int
+        fps           : float
+        video_codec   : str
+        has_audio     : bool
+        audio_codec   : str
+        bitrate_kbps  : int
+        size_bytes    : int
+    """
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams", "-show_format",
+            str(filepath),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    info: dict = {
+        "duration_sec": 0.0,
+        "has_video": False,
+        "width": 0,
+        "height": 0,
+        "fps": 0.0,
+        "video_codec": "",
+        "has_audio": False,
+        "audio_codec": "",
+        "bitrate_kbps": 0,
+        "size_bytes": 0,
+    }
+    try:
+        data = json.loads(result.stdout)
+        fmt = data.get("format", {})
+        dur = fmt.get("duration", 0)
+        if dur:
+            info["duration_sec"] = float(dur)
+        br = fmt.get("bit_rate", 0)
+        if br:
+            info["bitrate_kbps"] = int(br) // 1000
+        size = fmt.get("size", 0)
+        if size:
+            info["size_bytes"] = int(size)
+        for stream in data.get("streams", []):
+            ctype = stream.get("codec_type")
+            if ctype == "video" and not info["has_video"]:
+                info["has_video"] = True
+                info["width"] = stream.get("width", 0)
+                info["height"] = stream.get("height", 0)
+                info["video_codec"] = stream.get("codec_name", "")
+                fps_str = stream.get("r_frame_rate", "0/1")
+                try:
+                    num, den = fps_str.split("/")
+                    info["fps"] = round(int(num) / int(den), 3) if int(den) else 0.0
+                except Exception:
+                    info["fps"] = 0.0
+                if not info["duration_sec"]:
+                    sdur = stream.get("duration", 0)
+                    if sdur:
+                        info["duration_sec"] = float(sdur)
+            elif ctype == "audio" and not info["has_audio"]:
+                info["has_audio"] = True
+                info["audio_codec"] = stream.get("codec_name", "")
+    except Exception:
+        pass
+    return info
+
+
 def get_audio_info(filepath: Path) -> dict:
     """
     Return dict:

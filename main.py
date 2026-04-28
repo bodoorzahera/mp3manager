@@ -74,12 +74,27 @@ MENU = [
     ("n", "Normalize Volume     equalize loudness (EBU R128 loudnorm)"),
     ("b", "Batch by Folder Name process sp1.25bt64 style subfolders"),
     ("p", "Pipeline             convert→compress→speed→silence→rename"),
+    ("v", "Video                manage video files (compress/trim/merge/...)"),
     ("t", "Launch TUI           open Textual graphical interface"),
     ("0", "Exit"),
 ]
 
-SESSION_OPS = {"compress": "2", "speed": "3", "split": "4",
-               "silence": "5", "convert": "6"}
+VIDEO_MENU = [
+    ("1", "Rename & Arrange     fix prefixes, sort by sequence"),
+    ("2", "Compress             reduce size (CRF + resolution)"),
+    ("3", "Speed                change playback speed (video+audio)"),
+    ("4", "Trim / Cut           cut from timestamp to timestamp"),
+    ("5", "Convert Format       MKV→MP4, AVI→MKV, etc."),
+    ("6", "Merge                concatenate video files"),
+    ("7", "Extract Audio        export audio track → MP3/AAC/WAV"),
+    ("8", "Export List (CSV)    file inventory with resolution/fps"),
+    ("0", "Back to main menu"),
+]
+
+SESSION_OPS = {
+    "compress": "2", "speed": "3", "split": "4", "silence": "5", "convert": "6",
+    "video_compress": "v2", "video_speed": "v3",
+}
 
 
 def _get_op(key: str):
@@ -96,6 +111,48 @@ def _get_op(key: str):
     if key == "b": from operations.batch_by_name  import run_batch_by_name;  return run_batch_by_name
     if key == "p": from operations.pipeline       import run_pipeline;       return run_pipeline
     return None
+
+
+def _get_video_op(key: str):
+    if key == "1":  from operations.video.rename       import run_video_rename;        return run_video_rename
+    if key == "2":  from operations.video.compress     import run_video_compress;      return run_video_compress
+    if key == "3":  from operations.video.speed        import run_video_speed;         return run_video_speed
+    if key == "4":  from operations.video.trim         import run_video_trim;          return run_video_trim
+    if key == "5":  from operations.video.convert      import run_video_convert;       return run_video_convert
+    if key == "6":  from operations.video.merge        import run_video_merge;         return run_video_merge
+    if key == "7":  from operations.video.extract_audio import run_video_extract_audio; return run_video_extract_audio
+    if key == "8":  from operations.video.export_csv   import run_video_export_csv;    return run_video_export_csv
+    # session resume keys
+    if key == "v2": from operations.video.compress     import run_video_compress;      return run_video_compress
+    if key == "v3": from operations.video.speed        import run_video_speed;         return run_video_speed
+    return None
+
+
+def _video_menu(work_folder: Path, prefs: dict, dry_run: bool, recursive: bool) -> None:
+    while True:
+        console.print()
+        choice = choose("Video operations:", VIDEO_MENU, default="2")
+
+        if choice == "0":
+            break
+
+        fn = _get_video_op(choice)
+        if fn is None:
+            continue
+
+        try:
+            fn(work_folder, prefs, dry_run=dry_run, recursive=recursive)
+        except KeyboardInterrupt:
+            warning("\nCancelled.")
+        except Exception as exc:
+            error(f"Error: {exc}")
+            if confirm("Show traceback?", default=False):
+                console.print_exception()
+
+        save_prefs(prefs)
+
+        if not confirm("Return to video menu?", default=True):
+            break
 
 
 def main() -> None:
@@ -165,7 +222,8 @@ def main() -> None:
         last    = session.get("last_processed", "?")
         warning(f"Interrupted session: [bold]{op_name}[/]  (last: [cyan]{last}[/])")
         if confirm("Resume interrupted session?", default=True):
-            fn = _get_op(SESSION_OPS[op_name])
+            resume_key = SESSION_OPS[op_name]
+            fn = _get_video_op(resume_key) if op_name.startswith("video_") else _get_op(resume_key)
             if fn:
                 try:
                     fn(work_folder, prefs, dry_run=False, session=session, recursive=recursive)
@@ -196,6 +254,10 @@ def main() -> None:
         if choice == "0":
             info("Goodbye!")
             break
+
+        if choice == "v":
+            _video_menu(work_folder, prefs, dry_run, recursive)
+            continue
 
         if choice == "t":
             console.print("\n[cyan]Launching TUI...[/]")

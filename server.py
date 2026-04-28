@@ -66,10 +66,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import (load_prefs, save_prefs, load_presets, save_preset, delete_preset,
                     save_last_run, load_last_run)
-from utils.ffmpeg_utils import check_ffmpeg, get_audio_info, format_duration
+from utils.ffmpeg_utils import check_ffmpeg, get_audio_info, get_video_info, format_duration
 from utils.file_utils import (
-    scan_mp3s, scan_all_media, scan_summary, human_size,
-    get_mtime, mtime_str, scan_folders,
+    scan_mp3s, scan_all_media, scan_videos, scan_summary, human_size,
+    VIDEO_EXTS, get_mtime, mtime_str, scan_folders,
 )
 
 app = FastAPI(title="MP3 Manager API")
@@ -100,12 +100,13 @@ async def folder_info(path: str = ".", recursive: bool = False):
     try:
         all_media = scan_all_media(folder, recursive=recursive)
         mp3s      = [f for f in all_media if f.suffix.lower() == ".mp3"]
-        others    = [f for f in all_media if f.suffix.lower() != ".mp3"]
+        videos    = [f for f in all_media if f.suffix.lower() in VIDEO_EXTS]
+        others    = [f for f in all_media if f.suffix.lower() != ".mp3" and f.suffix.lower() not in VIDEO_EXTS]
         sub_dirs  = scan_folders(folder)
     except PermissionError as e:
         return JSONResponse({"error": str(e)}, status_code=403)
 
-    def _file_info(f: Path) -> dict | None:
+    def _audio_file_info(f: Path) -> dict | None:
         try:
             st = f.stat()
         except (FileNotFoundError, OSError):
@@ -118,6 +119,28 @@ async def folder_info(path: str = ".", recursive: bool = False):
             "mtime": mtime_str(f),
             "duration": format_duration(ai.get("duration_sec", 0)) if ai else "",
             "bitrate": ai.get("bitrate_kbps", 0) if ai else 0,
+            "type": "audio",
+        }
+
+    def _video_file_info(f: Path) -> dict | None:
+        try:
+            st = f.stat()
+        except (FileNotFoundError, OSError):
+            return None
+        vi = get_video_info(f)
+        res = f"{vi['width']}x{vi['height']}" if vi.get("width") else ""
+        return {
+            "name": f.name,
+            "size": st.st_size,
+            "size_human": human_size(st.st_size),
+            "mtime": mtime_str(f),
+            "duration": format_duration(vi.get("duration_sec", 0)),
+            "resolution": res,
+            "fps": round(vi.get("fps", 0), 2),
+            "video_codec": vi.get("video_codec", ""),
+            "audio_codec": vi.get("audio_codec", ""),
+            "bitrate": vi.get("bitrate_kbps", 0),
+            "type": "video",
         }
 
     return {
@@ -125,9 +148,11 @@ async def folder_info(path: str = ".", recursive: bool = False):
         "name": folder.name,
         "summary": scan_summary(folder),
         "mp3_count": len(mp3s),
+        "video_count": len(videos),
         "other_media_count": len(others),
         "subfolder_count": len(sub_dirs),
-        "mp3_files": [info for f in mp3s[:50] if (info := _file_info(f))],
+        "mp3_files": [info for f in mp3s[:50] if (info := _audio_file_info(f))],
+        "video_files": [info for f in videos[:20] if (info := _video_file_info(f))],
         "other_files": [{"name": f.name, "ext": f.suffix.upper()} for f in others[:20]],
         "subfolders": [{"name": d.name, "mtime": mtime_str(d)} for d in sub_dirs[:20]],
         "ffmpeg_ok": check_ffmpeg(),
@@ -409,14 +434,21 @@ def _run_worker(
 # ── Operation dispatch ─────────────────────────────────────────────────────────
 
 def _apply_params_to_prefs(params: dict, prefs: dict) -> None:
-    if "bitrate"       in params: prefs["default_bitrate"]       = int(params["bitrate"])
-    if "speed"         in params: prefs["default_speed"]         = float(params["speed"])
-    if "split_dur"     in params: prefs["default_split_duration"] = params["split_dur"]
-    if "silence_sec"   in params: prefs["silence_threshold_sec"] = float(params["silence_sec"])
-    if "silence_db"    in params: prefs["silence_db"]            = int(params["silence_db"])
-    if "number_action" in params: prefs["number_action"]         = params["number_action"]
-    if "after_split"   in params: prefs["after_split"]           = params["after_split"]
-    if "recursive"     in params: prefs["recursive_scan"]        = bool(params["recursive"])
+    if "bitrate"          in params: prefs["default_bitrate"]        = int(params["bitrate"])
+    if "speed"            in params: prefs["default_speed"]          = float(params["speed"])
+    if "split_dur"        in params: prefs["default_split_duration"]  = params["split_dur"]
+    if "silence_sec"      in params: prefs["silence_threshold_sec"]  = float(params["silence_sec"])
+    if "silence_db"       in params: prefs["silence_db"]             = int(params["silence_db"])
+    if "number_action"    in params: prefs["number_action"]          = params["number_action"]
+    if "after_split"      in params: prefs["after_split"]            = params["after_split"]
+    if "recursive"        in params: prefs["recursive_scan"]         = bool(params["recursive"])
+    # Video params
+    if "video_crf"        in params: prefs["video_crf"]              = int(params["video_crf"])
+    if "video_res"        in params: prefs["video_res"]              = str(params["video_res"]).strip()
+    if "video_speed"      in params: prefs["video_default_speed"]    = float(params["video_speed"])
+    if "video_format"     in params: prefs["video_output_format"]    = str(params["video_format"]).strip().lower()
+    if "audio_format"     in params: prefs["video_audio_format"]     = str(params["audio_format"]).strip().lower()
+    if "copy_streams"     in params: prefs["video_copy_streams"]     = bool(params["copy_streams"])
 
 
 def _dispatch(op: str, folder: Path, params: dict, prefs: dict, dry_run: bool) -> None:
@@ -476,6 +508,60 @@ def _dispatch(op: str, folder: Path, params: dict, prefs: dict, dry_run: bool) -
 
     elif op == "pipeline":
         _pipeline_headless(folder, params, prefs, dry_run, recursive=recursive)
+
+    elif op == "video_rename":
+        _video_rename_headless(folder, params, prefs, dry_run, recursive=recursive)
+
+    elif op == "video_compress":
+        _video_compress_headless(
+            folder,
+            crf=int(params.get("video_crf", prefs.get("video_crf", 23))),
+            res=str(params.get("video_res", prefs.get("video_res", ""))).strip(),
+            dry_run=dry_run,
+            recursive=recursive,
+        )
+
+    elif op == "video_speed":
+        _video_speed_headless(
+            folder,
+            speed=float(params.get("video_speed", prefs.get("video_default_speed", 1.0))),
+            dry_run=dry_run,
+            recursive=recursive,
+        )
+
+    elif op == "video_trim":
+        _video_trim_headless(
+            folder,
+            start_raw=str(params.get("trim_start", "0")),
+            end_raw=str(params.get("trim_end", "")),
+            dry_run=dry_run,
+        )
+
+    elif op == "video_convert":
+        _video_convert_headless(
+            folder,
+            target_fmt=str(params.get("video_format", prefs.get("video_output_format", "mp4"))).strip().lower(),
+            copy_streams=bool(params.get("copy_streams", prefs.get("video_copy_streams", True))),
+            dry_run=dry_run,
+            recursive=recursive,
+        )
+
+    elif op == "video_merge":
+        from operations.video.merge import run_video_merge
+        run_video_merge(folder, prefs, dry_run=dry_run, recursive=recursive)
+
+    elif op == "video_extract":
+        _video_extract_headless(
+            folder,
+            audio_fmt=str(params.get("audio_format", prefs.get("video_audio_format", "mp3"))).strip().lower(),
+            bitrate=int(params.get("bitrate", prefs.get("default_bitrate", 128))),
+            dry_run=dry_run,
+            recursive=recursive,
+        )
+
+    elif op == "video_csv":
+        from operations.video.export_csv import run_video_export_csv
+        run_video_export_csv(folder, prefs, dry_run=dry_run, recursive=recursive)
 
     else:
         from ui import error
@@ -906,6 +992,299 @@ def _pipeline_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, r
         sr.elapsed_sec = time.time() - t0
 
     _print_report(reports)
+
+
+# ── Video headless wrappers ───────────────────────────────────────────────────
+
+def _video_rename_headless(folder: Path, params: dict, prefs: dict, dry_run: bool, recursive: bool = False) -> None:
+    from ui import info, success, error
+    from utils.file_utils import (
+        scan_videos, extract_sequence_info, extract_with_pattern, body_to_filename,
+        apply_number_action, backup_names, clean_stem, set_mtime,
+    )
+    import time as _time
+
+    if recursive:
+        dirs = sorted(d for d in folder.rglob("*") if d.is_dir() and not d.name.startswith("."))
+        for d in [folder] + dirs:
+            if scan_videos(d, recursive=False):
+                info(f"── {d.name}")
+                _video_rename_headless(d, params, prefs, dry_run, recursive=False)
+        return
+
+    files = scan_videos(folder, recursive=False)
+    if not files:
+        error(f"No video files  |  {scan_summary(folder)}"); return
+
+    number_action = params.get("number_action", prefs.get("number_action", "3"))
+    ai_pattern = params.get("ai_pattern")
+
+    def clean_body(raw: str) -> str:
+        b = clean_stem(raw)
+        b = apply_number_action(b, number_action)
+        return body_to_filename(b)
+
+    with_seq, no_seq = [], []
+    for f in files:
+        seq, body = extract_sequence_info(f.stem)
+        if ai_pattern:
+            ai_seq, ai_body = extract_with_pattern(f.stem, ai_pattern)
+            if ai_seq is not None:
+                seq, body = ai_seq, ai_body
+        if seq is not None:
+            with_seq.append((seq, body, f))
+        else:
+            no_seq.append((body, f))
+
+    with_seq.sort(key=lambda x: x[0])
+    base_time = _time.time()
+    STEP = 60
+
+    seq_vals = [s for s, _, _ in with_seq]
+    has_dup_seqs = len(seq_vals) != len(set(seq_vals))
+
+    renames = []
+    for rank, (seq, body, f) in enumerate(with_seq):
+        effective_seq = rank + 1 if has_dup_seqs else seq
+        renames.append((f, f"{effective_seq:03d}_{clean_body(body)}{f.suffix.lower()}", base_time - rank * STEP))
+    for body, f in no_seq:
+        renames.append((f, f"{clean_body(body)}{f.suffix.lower()}", get_mtime(f)))
+
+    total = len(renames)
+    changed = sum(1 for old_f, new_name, _ in renames if old_f.name != new_name)
+    info(f"Video rename: {total} files, {changed} to rename")
+
+    if dry_run:
+        for i, (old_f, new_name, _) in enumerate(renames, 1):
+            if old_f.name != new_name:
+                info(f"[{i}/{total}] {old_f.name} → {new_name} [dry]")
+        success("Dry run done."); return
+
+    backup_names(files, folder / ".rename_backup.json")
+
+    name_counts: dict[str, int] = {}
+    for _, n, _ in renames: name_counts[n.lower()] = name_counts.get(n.lower(), 0) + 1
+    seen: dict[str, int] = {}
+    deduped = []
+    for old_f, new_name, mtime in renames:
+        key = new_name.lower()
+        count = seen.get(key, 0); seen[key] = count + 1
+        if name_counts[key] > 1 and count > 0:
+            stem_p = Path(new_name).stem; ext_p = Path(new_name).suffix
+            new_name = f"{stem_p}_dup{count}{ext_p}"
+        deduped.append((old_f, new_name, mtime))
+
+    for i, (old_f, new_name, mtime) in enumerate(deduped, 1):
+        _emit_progress(i, total, old_f.name, "video_rename")
+        new_path = old_f.parent / new_name
+        try:
+            if old_f.name != new_name:
+                tmp = old_f.parent / (new_name + ".__tmp__")
+                old_f.rename(tmp); tmp.rename(new_path)
+                success(f"✓ [{i}/{total}] {old_f.name} → {new_name}")
+            set_mtime(new_path, mtime)
+        except Exception as exc:
+            error(f"✗ [{i}/{total}] {old_f.name} — {exc}")
+
+
+def _video_compress_headless(folder: Path, crf: int, res: str, dry_run: bool, recursive: bool = False) -> None:
+    from ui import info, success, error
+    from utils.ffmpeg_utils import run_ffmpeg
+    from utils.file_utils import replace_if_smaller
+
+    files = scan_videos(folder, recursive=recursive)
+    if not files:
+        error(f"No video files  |  {scan_summary(folder)}"); return
+
+    total = len(files)
+    info(f"Video compress {total} file(s)  CRF={crf}" + (f"  max {res}p" if res else ""))
+    if dry_run: success("Dry run done."); return
+
+    done = err_n = 0
+    for i, f in enumerate(files, 1):
+        _emit_progress(i, total, f.name, "video_compress")
+        info(f"[{i}/{total}] {f.name}...")
+        mtime = get_mtime(f)
+        tmp = f.with_suffix(".tmp_vc" + f.suffix)
+        vf_args = ["-vf", f"scale=-2:{res}"] if res else []
+        args = ["-i", str(f)] + vf_args + ["-c:v", "libx264", "-crf", str(crf), "-c:a", "copy", "-movflags", "+faststart", str(tmp)]
+        ok, err_msg = run_ffmpeg(args)
+        if ok:
+            replace_if_smaller(f, tmp, mtime)
+            success(f"✓ [{i}/{total}] {f.name}")
+            done += 1
+        else:
+            if tmp.exists(): tmp.unlink()
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
+            err_n += 1
+
+    success(f"Video compress done: {done} ok, {err_n} errors")
+
+
+def _video_speed_headless(folder: Path, speed: float, dry_run: bool, recursive: bool = False) -> None:
+    from ui import info, success, error
+    from utils.ffmpeg_utils import run_ffmpeg, build_atempo_filter
+
+    files = scan_videos(folder, recursive=recursive)
+    if not files:
+        error(f"No video files  |  {scan_summary(folder)}"); return
+
+    pts = f"setpts={1/speed:.6f}*PTS"
+    audio_filter = build_atempo_filter(speed)
+    total = len(files)
+    info(f"Video speed {speed}× on {total} file(s)")
+    if dry_run: success("Dry run done."); return
+
+    done = err_n = 0
+    for i, f in enumerate(files, 1):
+        _emit_progress(i, total, f.name, "video_speed")
+        info(f"[{i}/{total}] {f.name}...")
+        mtime = get_mtime(f)
+        tmp = f.with_suffix(".tmp_vs" + f.suffix)
+        vi = get_video_info(f)
+        args = ["-i", str(f), "-vf", pts]
+        if vi.get("has_audio"):
+            args += ["-af", audio_filter]
+        args.append(str(tmp))
+        ok, err_msg = run_ffmpeg(args)
+        if ok:
+            f.unlink(); tmp.rename(f)
+            from utils.file_utils import set_mtime
+            set_mtime(f, mtime)
+            success(f"✓ [{i}/{total}] {f.name}")
+            done += 1
+        else:
+            if tmp.exists(): tmp.unlink()
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
+            err_n += 1
+
+    success(f"Video speed done: {done} ok, {err_n} errors")
+
+
+def _video_trim_headless(folder: Path, start_raw: str, end_raw: str, dry_run: bool) -> None:
+    from ui import info, success, error
+    from utils.ffmpeg_utils import run_ffmpeg, parse_duration
+    from utils.file_utils import set_mtime
+
+    files = scan_videos(folder, recursive=False)
+    if not files:
+        error(f"No video files  |  {scan_summary(folder)}"); return
+
+    start_sec = parse_duration(start_raw) if start_raw else 0
+    end_sec   = parse_duration(end_raw)   if end_raw   else None
+
+    total = len(files)
+    info(f"Video trim: {total} file(s)  {start_raw or '0'} → {end_raw or 'end'}")
+    if dry_run: success("Dry run done."); return
+
+    done = err_n = 0
+    for i, f in enumerate(files, 1):
+        _emit_progress(i, total, f.name, "video_trim")
+        mtime = get_mtime(f)
+        out = f.with_stem(f.stem + "_trim")
+        counter = 1
+        while out.exists(): out = f.with_stem(f"{f.stem}_trim_{counter}"); counter += 1
+        args = ["-i", str(f), "-ss", str(start_sec)]
+        if end_sec is not None:
+            args += ["-to", str(end_sec)]
+        args += ["-c", "copy", "-avoid_negative_ts", "1", str(out)]
+        ok, err_msg = run_ffmpeg(args)
+        if ok:
+            set_mtime(out, mtime)
+            success(f"✓ [{i}/{total}] → {out.name}")
+            done += 1
+        else:
+            if out.exists(): out.unlink()
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
+            err_n += 1
+
+    success(f"Video trim done: {done} ok, {err_n} errors")
+
+
+def _video_convert_headless(folder: Path, target_fmt: str, copy_streams: bool, dry_run: bool, recursive: bool = False) -> None:
+    from ui import info, success, error
+    from utils.ffmpeg_utils import run_ffmpeg
+    from utils.file_utils import set_mtime
+    from operations.video.convert import OUTPUT_FORMATS
+
+    if target_fmt not in OUTPUT_FORMATS:
+        error(f"Unknown video format: {target_fmt}"); return
+
+    fmt_info = OUTPUT_FORMATS[target_fmt]
+    target_ext = fmt_info["ext"]
+
+    files = scan_videos(folder, recursive=recursive)
+    to_process = [f for f in files if f.suffix.lower() != target_ext]
+    if not to_process:
+        info(f"No video files to convert (all already {target_fmt})"); return
+
+    total = len(to_process)
+    info(f"Video convert {total} file(s) → {target_fmt}  copy={'yes' if copy_streams else 'no'}")
+    if dry_run: success("Dry run done."); return
+
+    done = err_n = 0
+    for i, f in enumerate(to_process, 1):
+        _emit_progress(i, total, f.name, "video_convert")
+        out = f.with_suffix(target_ext)
+        counter = 1
+        while out.exists(): out = f.with_stem(f.stem + f"_{counter}").with_suffix(target_ext); counter += 1
+        mtime = get_mtime(f)
+        if copy_streams:
+            args = ["-i", str(f), "-c", "copy", str(out)]
+        else:
+            args = ["-i", str(f), "-c:v", fmt_info["vcodec"], "-c:a", fmt_info["acodec"], str(out)]
+        ok, err_msg = run_ffmpeg(args)
+        if ok:
+            set_mtime(out, mtime)
+            success(f"✓ [{i}/{total}] {f.name} → {out.name}")
+            done += 1
+        else:
+            if out.exists(): out.unlink()
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
+            err_n += 1
+
+    success(f"Video convert done: {done} ok, {err_n} errors")
+
+
+def _video_extract_headless(folder: Path, audio_fmt: str, bitrate: int, dry_run: bool, recursive: bool = False) -> None:
+    from ui import info, success, error
+    from utils.ffmpeg_utils import run_ffmpeg
+    from utils.file_utils import set_mtime
+
+    files = scan_videos(folder, recursive=recursive)
+    if not files:
+        error(f"No video files  |  {scan_summary(folder)}"); return
+
+    ext = "m4a" if audio_fmt == "aac" else audio_fmt
+    total = len(files)
+    info(f"Video extract audio {total} file(s) → {audio_fmt}")
+    if dry_run: success("Dry run done."); return
+
+    done = err_n = 0
+    for i, f in enumerate(files, 1):
+        _emit_progress(i, total, f.name, "video_extract")
+        out = f.with_suffix("." + ext)
+        counter = 1
+        while out.exists(): out = f.with_stem(f.stem + f"_{counter}").with_suffix("." + ext); counter += 1
+        mtime = get_mtime(f)
+        args = ["-i", str(f), "-vn"]
+        if audio_fmt != "wav":
+            args += ["-ab", f"{bitrate}k"]
+        if audio_fmt == "aac":
+            args += ["-c:a", "aac"]
+        args.append(str(out))
+        ok, err_msg = run_ffmpeg(args)
+        if ok:
+            from utils.file_utils import set_mtime as _sm
+            _sm(out, mtime)
+            success(f"✓ [{i}/{total}] → {out.name}")
+            done += 1
+        else:
+            if out.exists(): out.unlink()
+            error(f"✗ [{i}/{total}] {f.name}: {err_msg}")
+            err_n += 1
+
+    success(f"Video extract done: {done} ok, {err_n} errors")
 
 
 # ── Rename analyze ─────────────────────────────────────────────────────────────

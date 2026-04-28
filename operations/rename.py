@@ -28,26 +28,10 @@ from utils.file_utils import (
 )
 
 
-def run_rename(folder: Path, prefs: dict, dry_run: bool = False, recursive: bool = False, **_) -> None:
-    header("Rename & Arrange")
-
-    # Recursive mode: process each subfolder independently (own numbering per folder)
-    if recursive:
-        dirs = sorted(d for d in folder.rglob("*") if d.is_dir() and not d.name.startswith("."))
-        for d in [folder] + dirs:
-            if scan_mp3s(d, recursive=False):
-                console.rule(f"[bold]{d.name}[/]")
-                run_rename(d, prefs, dry_run=dry_run, recursive=False)
-        return
-
-    files = scan_mp3s(folder, recursive=False)
-    if not files:
-        from utils.file_utils import scan_summary
-        error(f"No MP3 files found in: {folder}")
-        info(f"Folder contains: {scan_summary(folder)}")
-        return
-
-    info(f"Found [bold]{len(files)}[/] MP3 file(s)")
+def _rename_files_core(
+    files: list[Path], folder: Path, prefs: dict, dry_run: bool
+) -> None:
+    """Shared rename logic used by both audio and video rename operations."""
 
     # ── Backup ────────────────────────────────────────────────────────────────
     backup_file = folder / ".rename_backup.json"
@@ -211,3 +195,25 @@ def run_rename(folder: Path, prefs: dict, dry_run: bool = False, recursive: bool
     success(f"Done!  {changed - err_count} renamed  |  {err_count} errors")
     if err_count == 0 and backup_file.exists():
         backup_file.unlink()
+
+
+def run_rename(folder: Path, prefs: dict, dry_run: bool = False, recursive: bool = False, **_) -> None:
+    header("Rename & Arrange")
+
+    if recursive:
+        dirs = sorted(d for d in folder.rglob("*") if d.is_dir() and not d.name.startswith("."))
+        for d in [folder] + dirs:
+            if scan_mp3s(d, recursive=False):
+                console.rule(f"[bold]{d.name}[/]")
+                run_rename(d, prefs, dry_run=dry_run, recursive=False)
+        return
+
+    files = scan_mp3s(folder, recursive=False)
+    if not files:
+        from utils.file_utils import scan_summary
+        error(f"No MP3 files found in: {folder}")
+        info(f"Folder contains: {scan_summary(folder)}")
+        return
+
+    info(f"Found [bold]{len(files)}[/] MP3 file(s)")
+    _rename_files_core(files, folder, prefs, dry_run)

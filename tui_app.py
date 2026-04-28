@@ -79,16 +79,25 @@ from utils.file_utils import make_working_copy
 # ── Operation registry ─────────────────────────────────────────────────────────
 
 OPS: list[tuple[str, str, str]] = [
-    ("pipeline", "P", "▶ Pipeline  (convert→compress→speed→silence→rename)"),
-    ("rename",   "1", "Rename & Arrange"),
-    ("compress", "2", "Compress"),
-    ("speed",    "3", "Speed"),
-    ("split",    "4", "Split"),
-    ("silence",  "5", "Remove Silence"),
-    ("convert",  "6", "Convert → MP3"),
-    ("merge",    "7", "Merge Files"),
-    ("csv",      "8", "Export CSV"),
-    ("series",   "9", "Series Detection"),
+    ("pipeline",       "P",  "▶ Pipeline  (convert→compress→speed→silence→rename)"),
+    ("rename",         "1",  "Rename & Arrange"),
+    ("compress",       "2",  "Compress"),
+    ("speed",          "3",  "Speed"),
+    ("split",          "4",  "Split"),
+    ("silence",        "5",  "Remove Silence"),
+    ("convert",        "6",  "Convert → MP3"),
+    ("merge",          "7",  "Merge Files"),
+    ("csv",            "8",  "Export CSV"),
+    ("series",         "9",  "Series Detection"),
+    # ── Video section ──
+    ("video_rename",   "V1", "📹 Video: Rename"),
+    ("video_compress", "V2", "📹 Video: Compress"),
+    ("video_speed",    "V3", "📹 Video: Speed"),
+    ("video_trim",     "V4", "📹 Video: Trim/Cut"),
+    ("video_convert",  "V5", "📹 Video: Convert"),
+    ("video_merge",    "V6", "📹 Video: Merge"),
+    ("video_extract",  "V7", "📹 Video: Extract Audio"),
+    ("video_csv",      "V8", "📹 Video: Export CSV"),
 ]
 
 
@@ -113,6 +122,22 @@ def _get_op_fn(key: str):
         from operations.series  import run_series;    return run_series
     if key == "pipeline":
         from operations.pipeline import run_pipeline; return run_pipeline
+    if key == "video_rename":
+        from operations.video.rename import run_video_rename; return run_video_rename
+    if key == "video_compress":
+        from operations.video.compress import run_video_compress; return run_video_compress
+    if key == "video_speed":
+        from operations.video.speed import run_video_speed; return run_video_speed
+    if key == "video_trim":
+        from operations.video.trim import run_video_trim; return run_video_trim
+    if key == "video_convert":
+        from operations.video.convert import run_video_convert; return run_video_convert
+    if key == "video_merge":
+        from operations.video.merge import run_video_merge; return run_video_merge
+    if key == "video_extract":
+        from operations.video.extract_audio import run_video_extract_audio; return run_video_extract_audio
+    if key == "video_csv":
+        from operations.video.export_csv import run_video_export_csv; return run_video_export_csv
     return None
 
 
@@ -244,6 +269,48 @@ class PipelineConfig(ModalScreen):
                     id="convert_bitrate",
                 )
 
+            if "video_compress" in self._ops:
+                yield Label("── 📹 Video Compress ──", classes="section")
+                yield Input(
+                    value=str(self._prefs.get("video_crf", 23)),
+                    placeholder="CRF (18=best, 28=smallest)",
+                    id="video_crf",
+                )
+                yield Input(
+                    value=str(self._prefs.get("video_res", "720")),
+                    placeholder="Max height px (blank=no change)",
+                    id="video_res",
+                )
+
+            if "video_speed" in self._ops:
+                yield Label("── 📹 Video Speed ──", classes="section")
+                yield Input(
+                    value=str(self._prefs.get("video_default_speed", 1.0)),
+                    placeholder="Speed (e.g. 1.5)",
+                    id="video_speed_val",
+                )
+
+            if "video_trim" in self._ops:
+                yield Label("── 📹 Video Trim ──", classes="section")
+                yield Input(value="0", placeholder="Start time (e.g. 00:01:30)", id="video_trim_start")
+                yield Input(value="",  placeholder="End time (blank=end of file)", id="video_trim_end")
+
+            if "video_convert" in self._ops:
+                yield Label("── 📹 Video Convert ──", classes="section")
+                yield Input(
+                    value=self._prefs.get("video_output_format", "mp4"),
+                    placeholder="Format: mp4 / mkv / webm / avi",
+                    id="video_fmt",
+                )
+
+            if "video_extract" in self._ops:
+                yield Label("── 📹 Extract Audio ──", classes="section")
+                yield Input(
+                    value=self._prefs.get("video_audio_format", "mp3"),
+                    placeholder="Audio format: mp3 / aac / wav",
+                    id="video_audio_fmt",
+                )
+
             with Horizontal(id="buttons"):
                 yield Button("▶ Run", id="run", variant="success")
                 yield Button("Cancel", id="cancel")
@@ -282,6 +349,11 @@ Screen {
     text-style: bold;
     margin-bottom: 1;
     padding: 0 0;
+}
+#sidebar Label.section-divider {
+    color: $accent;
+    text-style: bold;
+    margin-top: 1;
 }
 #sidebar Checkbox {
     margin: 0;
@@ -361,6 +433,8 @@ class MP3ManagerTUI(App):
             with Vertical(id="sidebar"):
                 yield Label("📋 Pipeline", classes="title")
                 for key, num, label in OPS:
+                    if key == "video_rename":
+                        yield Label("── 📹 Video ──", classes="section-divider")
                     yield Checkbox(f"{num}. {label}", id=f"op_{key}")
 
                 yield Label("", id="folder-label")
@@ -561,6 +635,22 @@ class MP3ManagerTUI(App):
                 self.prefs["default_bitrate"] = int(params["convert_bitrate"])
             except ValueError:
                 pass
+        if "video_crf" in params:
+            try:
+                self.prefs["video_crf"] = int(params["video_crf"])
+            except ValueError:
+                pass
+        if "video_res" in params:
+            self.prefs["video_res"] = params["video_res"].strip()
+        if "video_speed_val" in params:
+            try:
+                self.prefs["video_default_speed"] = float(params["video_speed_val"])
+            except ValueError:
+                pass
+        if "video_fmt" in params:
+            self.prefs["video_output_format"] = params["video_fmt"].strip().lower()
+        if "video_audio_fmt" in params:
+            self.prefs["video_audio_format"] = params["video_audio_fmt"].strip().lower()
 
     def _update_status(self, msg: str = "") -> None:
         parts = []

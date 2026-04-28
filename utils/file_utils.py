@@ -263,6 +263,23 @@ def scan_non_mp3_media(folder: Path, recursive: bool = False) -> list[Path]:
                   and '.tmp_' not in f.name)
 
 
+def scan_videos(folder: Path, recursive: bool = False) -> list[Path]:
+    """Return video files (mp4/mkv/avi/etc.). Optionally recurse into subfolders."""
+    try:
+        if recursive:
+            files = sorted(
+                (f for f in folder.rglob("*") if f.is_file() and f.suffix.lower() in VIDEO_EXTS),
+                key=lambda f: (f.parent.name, f.name.lower()),
+            )
+        else:
+            files = sorted(f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_EXTS)
+    except PermissionError:
+        raise PermissionError(f"Cannot read folder: {folder}")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Folder not found: {folder}")
+    return [f for f in files if '.tmp_' not in f.name]
+
+
 def scan_folders(parent: Path) -> list[Path]:
     folders = [f for f in parent.iterdir()
                if f.is_dir() and not f.name.startswith(".")]

@@ -24,6 +24,13 @@ DEFAULT_PREFS: dict = {
     "merge_gap_sec": 0.0,
     "csv_newest_first": True,
     "recursive_scan": False,
+    # Video section defaults
+    "video_crf":            23,
+    "video_res":            "720",
+    "video_default_speed":  1.0,
+    "video_output_format":  "mp4",
+    "video_audio_format":   "mp3",
+    "video_copy_streams":   True,
 }
 
 
